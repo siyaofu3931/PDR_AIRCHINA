@@ -22,26 +22,83 @@ Recorded samples are timestamped and can be downloaded as JSON.
 5. Tap **Stop** when done.
 6. Tap **Download JSON** to save the recorded session (meta + all samples).
 
-## Serving over HTTPS (for phone access)
+## Run on your iPhone
 
-Sensors only work in a **secure context** (HTTPS or `localhost`). To use the page on your phone:
+The app **must** be loaded over **HTTPS** for motion/orientation to work on iOS. Two ways to do it:
+
+### Option 1: GitHub Pages (easiest if the repo is on GitHub)
+
+1. Push your project to GitHub (e.g. `simon-jian/pedestrian_dead_reckoning`).
+2. On GitHub: open the repo → **Settings** → **Pages**.
+3. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
+4. Choose branch **main** (or **master**) and folder **/ (root)**. Save.
+5. After a minute, your site is at:  
+   **https://simon-jian.github.io/pedestrian_dead_reckoning/**  
+   (Use your actual username and repo name.)
+6. On your iPhone, open **Safari**, go to that URL, tap **Start**, and allow motion & orientation when prompted.
+
+### Option 2a: ngrok tunnel (quick local test)
+
+Use this when the project is only on your computer. Your iPhone and computer must be on the same Wi‑Fi.
+
+**One-time setup:** ngrok requires a free account and authtoken.
+1. Sign up: [dashboard.ngrok.com/signup](https://dashboard.ngrok.com/signup)
+2. Get your authtoken: [dashboard.ngrok.com/get-started/your-authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)
+3. Install it: `ngrok config add-authtoken YOUR_TOKEN`
+
+Then each time:
+
+1. **Terminal 1** – serve the project and leave it running:
+   ```bash
+   cd ~/pedestrian_dead_reckoning
+   python3 -m http.server 8000
+   ```
+
+2. **Terminal 2** – start the tunnel (leave it running):
+   ```bash
+   ngrok http 8000
+   ```
+
+3. In the ngrok terminal, copy the **https** URL from the **Forwarding** line (e.g. `https://abc123.ngrok-free.app`).
+
+4. On your iPhone (same Wi‑Fi), open **Safari**, paste that URL. Tap **Start**, then **Allow** when iOS asks for motion & orientation access.
+
+### Option 2b: localtunnel (no signup)
+
+If you don’t want to create an ngrok account, use localtunnel. You need Node.js/npm.
+
+1. **Terminal 1** – serve the project (same as above):
+   ```bash
+   cd ~/pedestrian_dead_reckoning
+   python3 -m http.server 8000
+   ```
+
+2. **Terminal 2** – start the tunnel (leave it running):
+   ```bash
+   npx localtunnel --port 8000
+   ```
+
+3. Copy the URL it prints (e.g. `https://something.loca.lt`). If your iPhone shows a **“Tunnel Password”** or “Click to continue” page: the password is your **computer’s public IP**. Find it by running on your computer: `curl -4 ifconfig.me` (or open [loca.lt/mytunnelpassword](https://loca.lt/mytunnelpassword) in a browser on the same network). Enter that IP as the password, then you’ll reach the app.
+
+4. On your iPhone, open **Safari**, paste that URL (and enter the tunnel password if asked). Tap **Start**, then **Allow** when iOS asks for motion & orientation access.
+
+### Option 3: Other hosts with HTTPS
+
+Upload the project (e.g. just `index.html` and `README.md` if you like) to any static host with HTTPS (Netlify, Vercel, your own server with SSL). Open that URL on your iPhone in Safari.
+
+---
+
+## Serving over HTTPS (reference)
+
+Sensors only work in a **secure context** (HTTPS or `localhost`). Summary of options:
 
 ### Option A: Local HTTPS with a tunnel (good for testing)
 
-1. Serve the folder with any static server over HTTPS, or use a tunnel to your local HTTP server:
-   - **ngrok**: `ngrok http 8000` then open the `https://…` URL on your phone.
-   - **Cloudflare Tunnel**, **localtunnel**, etc. work similarly.
-
-2. Example with Python and ngrok:
-   ```bash
-   cd pedestrian_dead_reckoning_testing_project
-   python3 -m http.server 8000
-   ```
-   In another terminal: `ngrok http 8000`, then open the HTTPS URL from ngrok on your phone.
+Use a tunnel (ngrok, Cloudflare Tunnel, localtunnel) to expose your local server over HTTPS. See **Option 2** above for ngrok steps.
 
 ### Option B: Deploy to a host with HTTPS
 
-Upload the project (e.g. only `index.html`) to any static host with HTTPS (GitHub Pages, Netlify, Vercel, your own server with SSL). Open that URL on your phone.
+See **Option 1** (GitHub Pages) or **Option 3** (Netlify, Vercel, etc.) above.
 
 ### Option C: Local only (Android)
 
