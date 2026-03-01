@@ -9,9 +9,9 @@ A single-page web app that records **IMU** (accelerometer), **gyroscope**, **mag
 | **IMU / Accelerometer** | `DeviceMotionEvent.acceleration` & `accelerationIncludingGravity` | x, y, z (m/s²) |
 | **Gyroscope** | `DeviceMotionEvent.rotationRate` | α, β, γ (deg/s) |
 | **Magnetometer / Compass** | `DeviceOrientationEvent` | α (heading), β, γ |
-| **Steps** | Derived from accelerometer (peak detection) | Step count |
+| **Steps** | Computed from accelerometer only (no native step API on web) | Step count via peak detection on magnitude |
 
-Recorded samples are timestamped and can be downloaded as JSON.
+Recorded samples are timestamped and can be downloaded as JSON. **Real-time trajectory** is computed by fusing **heading** (from orientation/compass) and **steps** (step count × step length) and drawn on a live 2D map.
 
 ## How to use
 
@@ -20,7 +20,8 @@ Recorded samples are timestamped and can be downloaded as JSON.
 3. Tap **Start** — on iOS you’ll be asked to allow motion & orientation access.
 4. Walk around; the page shows live values and step count.
 5. Tap **Stop** when done.
-6. Tap **Download JSON** to save the recorded session (meta + all samples).
+6. Tap **Reset all** to clear steps, trajectory, and recorded data and return to the initial state (recording continues if it was on).
+7. Tap **Download JSON** to save the recorded session (meta, samples with per-sample position, and trajectory path).
 
 ## Run on your iPhone
 
@@ -147,5 +148,5 @@ The project is already a git repo with files staged. To push to GitHub:
 ## Notes
 
 - **iOS**: Uses `DeviceMotionEvent.requestPermission()` and `DeviceOrientationEvent.requestPermission()`; the **Start** button must be tapped by the user.
-- **Steps**: Computed from accelerometer magnitude (threshold + min interval); tune in code if needed for your use case.
+- **Steps**: There is no web API for step count on iPhone/Android. Steps are **computed from the accelerometer**: magnitude √(x²+y²+z²), low‑pass smoothed, then **peak detection** (local maxima above a running baseline) with a minimum time between steps (~350 ms). Tune `stepConfig` in code if needed.
 - **Orientation alpha**: On devices with a magnetometer, alpha is the compass heading (0–360°).

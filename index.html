@@ -137,6 +137,41 @@
     }
     .message.error { color: var(--danger); }
     .message.success { color: var(--success); }
+    .trajectory-card {
+      overflow: hidden;
+    }
+    .trajectory-canvas-wrap {
+      position: relative;
+      width: 100%;
+      height: 220px;
+      background: var(--bg);
+      border-radius: 8px;
+      margin-top: 0.5rem;
+    }
+    #trajectoryCanvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+    .trajectory-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .btn-reset-all, .btn-reset-trajectory {
+      padding: 0.35rem 0.6rem;
+      font-size: 0.8rem;
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .btn-reset-all { padding: 0.9rem 1rem; font-size: 1rem; }
   </style>
 </head>
 <body>
@@ -152,6 +187,17 @@
     <div class="card">
       <h2>Steps</h2>
       <div class="steps-big" id="stepsCount">0</div>
+    </div>
+
+    <div class="card trajectory-card">
+      <h2>Trajectory (real-time)</h2>
+      <div class="trajectory-canvas-wrap">
+        <canvas id="trajectoryCanvas"></canvas>
+      </div>
+      <div class="trajectory-actions">
+        <span id="trajectoryInfo">x: 0 m, y: 0 m, heading: —°</span>
+        <button type="button" id="btnResetTrajectory" class="btn-reset-trajectory">Reset all</button>
+      </div>
     </div>
 
     <div class="card">
@@ -180,6 +226,7 @@
     <div class="buttons">
       <button id="btnStart" class="btn-start">Start</button>
       <button id="btnStop" class="btn-stop" disabled>Stop</button>
+      <button id="btnResetAll" class="btn-reset-all">Reset all</button>
       <button id="btnDownload" class="btn-download" disabled>Download JSON</button>
     </div>
   </div>
@@ -206,17 +253,34 @@
       let recording = false;
       let recordBuffer = [];
       let stepCount = 0;
+      let lastStepCountForTrajectory = 0;
 
-      // Step detection state
+      // Trajectory state (PDR fusion: heading from orientation, position from steps)
+      const STEP_LENGTH_M = 0.7;
+      let trajectory = {
+        path: [{ x: 0, y: 0 }],
+        x: 0,
+        y: 0,
+        headingDeg: null
+      };
+      const canvas = document.getElementById('trajectoryCanvas');
+      const trajectoryInfo = document.getElementById('trajectoryInfo');
+      const btnResetAll = document.getElementById('btnResetAll');
+      const btnResetTrajectory = document.getElementById('btnResetTrajectory');
+
+      // Step detection from IMU acceleration only (no native step API; works on iPhone/Android)
+      // Uses magnitude of acceleration + peak detection + baseline-relative threshold
       const stepConfig = {
-        threshold: 1.2,
-        minPeriodMs: 300,
-        lastStepTime: 0,
-        lastMagnitude: 0,
-        peakLock: false,
-        smoothing: 0.85
+        minPeriodMs: 350,
+        peakMinRatio: 0.025,
+        smoothing: 0.92,
+        baselineAlpha: 0.998
       };
       let smoothedMagnitude = 0;
+      let magnitudeBaseline = 0;
+      let lastMagnitude = 0;
+      let rising = false;
+      let lastStepTime = 0;
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -231,16 +295,141 @@
       function stepDetect(accG) {
         if (!accG || accG.x == null) return;
         const mag = Math.sqrt(accG.x * accG.x + accG.y * accG.y + accG.z * accG.z);
+        if (magnitudeBaseline === 0) magnitudeBaseline = mag;
         smoothedMagnitude = stepConfig.smoothing * smoothedMagnitude + (1 - stepConfig.smoothing) * mag;
+        magnitudeBaseline = stepConfig.baselineAlpha * magnitudeBaseline + (1 - stepConfig.baselineAlpha) * smoothedMagnitude;
         const now = Date.now();
-        if (smoothedMagnitude > stepConfig.threshold && !stepConfig.peakLock) {
-          if (now - stepConfig.lastStepTime >= stepConfig.minPeriodMs) {
-            stepCount++;
-            stepConfig.lastStepTime = now;
-            stepConfig.peakLock = true;
-          }
+        const aboveBaseline = smoothedMagnitude - magnitudeBaseline;
+        const minPeakHeight = magnitudeBaseline * stepConfig.peakMinRatio;
+        const isPeak = rising && lastMagnitude > smoothedMagnitude && aboveBaseline > minPeakHeight;
+        if (isPeak && now - lastStepTime >= stepConfig.minPeriodMs) {
+          stepCount++;
+          lastStepTime = now;
         }
-        if (smoothedMagnitude < stepConfig.threshold * 0.8) stepConfig.peakLock = false;
+        rising = smoothedMagnitude > lastMagnitude;
+        lastMagnitude = smoothedMagnitude;
+      }
+
+      function updateTrajectory() {
+        if (stepCount <= lastStepCountForTrajectory) return;
+        const newSteps = stepCount - lastStepCountForTrajectory;
+        lastStepCountForTrajectory = stepCount;
+        let headingDeg = trajectory.headingDeg;
+        if (lastOrientation != null && lastOrientation.alpha != null && !Number.isNaN(lastOrientation.alpha)) {
+          headingDeg = lastOrientation.alpha;
+          trajectory.headingDeg = headingDeg;
+        }
+        if (headingDeg == null) headingDeg = 0;
+        const rad = (headingDeg * Math.PI) / 180;
+        for (let i = 0; i < newSteps; i++) {
+          trajectory.x += STEP_LENGTH_M * Math.sin(rad);
+          trajectory.y += STEP_LENGTH_M * Math.cos(rad);
+          trajectory.path.push({ x: trajectory.x, y: trajectory.y });
+        }
+        drawTrajectory();
+        updateTrajectoryInfo();
+      }
+
+      function updateTrajectoryHeadingOnly() {
+        if (lastOrientation != null && lastOrientation.alpha != null && !Number.isNaN(lastOrientation.alpha)) {
+          trajectory.headingDeg = lastOrientation.alpha;
+        }
+        drawTrajectory();
+        updateTrajectoryInfo();
+      }
+
+      function updateTrajectoryInfo() {
+        const h = trajectory.headingDeg != null ? trajectory.headingDeg.toFixed(0) : '—';
+        trajectoryInfo.textContent = 'x: ' + trajectory.x.toFixed(2) + ' m, y: ' + trajectory.y.toFixed(2) + ' m, heading: ' + h + '°';
+      }
+
+      function drawTrajectory() {
+        const dpr = window.devicePixelRatio || 1;
+        const wrap = canvas.parentElement;
+        const w = wrap.clientWidth;
+        const h = wrap.clientHeight;
+        if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+          canvas.width = w * dpr;
+          canvas.height = h * dpr;
+          canvas.style.width = w + 'px';
+          canvas.style.height = h + 'px';
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0f0f12';
+        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4a9eff';
+        const danger = getComputedStyle(document.documentElement).getPropertyValue('--danger').trim() || '#ff453a';
+        const text = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8e8ec';
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, w, h);
+        const pts = trajectory.path;
+        if (pts.length < 2) {
+          ctx.fillStyle = accent;
+          ctx.beginPath();
+          ctx.arc(w / 2, h / 2, 6, 0, Math.PI * 2);
+          ctx.fill();
+          return;
+        }
+        let minX = pts[0].x, maxX = pts[0].x, minY = pts[0].y, maxY = pts[0].y;
+        for (let i = 1; i < pts.length; i++) {
+          minX = Math.min(minX, pts[i].x);
+          maxX = Math.max(maxX, pts[i].x);
+          minY = Math.min(minY, pts[i].y);
+          maxY = Math.max(maxY, pts[i].y);
+        }
+        const pad = 40;
+        const rangeX = Math.max(maxX - minX, 0.2);
+        const rangeY = Math.max(maxY - minY, 0.2);
+        const scale = Math.min((w - pad * 2) / rangeX, (h - pad * 2) / rangeY) * 0.95;
+        const cx = (minX + maxX) / 2;
+        const cy = (minY + maxY) / 2;
+        const sx = w / 2 - cx * scale;
+        const sy = h / 2 + cy * scale;
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(sx + pts[0].x * scale, sy - pts[0].y * scale);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineTo(sx + pts[i].x * scale, sy - pts[i].y * scale);
+        }
+        ctx.stroke();
+        const rx = sx + trajectory.x * scale;
+        const ry = sy - trajectory.y * scale;
+        ctx.fillStyle = danger;
+        ctx.beginPath();
+        ctx.arc(rx, ry, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = text;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (trajectory.headingDeg != null) {
+          const rad = (trajectory.headingDeg * Math.PI) / 180;
+          const len = 20;
+          ctx.strokeStyle = text;
+          ctx.beginPath();
+          ctx.moveTo(rx, ry);
+          ctx.lineTo(rx + len * Math.sin(rad), ry - len * Math.cos(rad));
+          ctx.stroke();
+        }
+      }
+
+      function resetAll() {
+        stepCount = 0;
+        lastStepCountForTrajectory = 0;
+        trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: trajectory.headingDeg };
+        recordBuffer = [];
+        smoothedMagnitude = 0;
+        magnitudeBaseline = 0;
+        lastMagnitude = 0;
+        rising = false;
+        lastStepTime = 0;
+        stepsEl.textContent = '0';
+        drawTrajectory();
+        updateTrajectoryInfo();
+        setMessage('Reset to initial state.', '');
       }
 
       function pushSample(motion, orientation) {
@@ -257,7 +446,8 @@
           accelerationIncludingGravity: accG ? { x: accG.x, y: accG.y, z: accG.z } : null,
           rotationRate: { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma },
           orientation: orientation ? { alpha: orientation.alpha, beta: orientation.beta, gamma: orientation.gamma, absolute: orientation.absolute } : null,
-          steps: stepCount
+          steps: stepCount,
+          position: { x: trajectory.x, y: trajectory.y }
         });
       }
 
@@ -278,6 +468,7 @@
           gyroGamma.textContent = formatNum(rot.gamma);
         }
         stepsEl.textContent = String(stepCount);
+        updateTrajectory();
         pushSample(e, lastOrientation);
       }
 
@@ -286,6 +477,7 @@
         orientAlpha.textContent = formatNum(e.alpha);
         orientBeta.textContent = formatNum(e.beta);
         orientGamma.textContent = formatNum(e.gamma);
+        updateTrajectoryHeadingOnly();
       }
 
       function startListeners() {
@@ -333,9 +525,13 @@
 
         recordBuffer = [];
         stepCount = 0;
+        lastStepCountForTrajectory = 0;
+        trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: null };
         smoothedMagnitude = 0;
-        stepConfig.lastStepTime = 0;
-        stepConfig.peakLock = false;
+        magnitudeBaseline = 0;
+        lastMagnitude = 0;
+        rising = false;
+        lastStepTime = 0;
         recording = true;
         startListeners();
         statusEl.className = 'status recording';
@@ -361,7 +557,8 @@
           recordedAt: new Date().toISOString(),
           durationMs: recordBuffer.length ? recordBuffer[recordBuffer.length - 1].t - recordBuffer[0].t : 0,
           stepCount,
-          sampleCount: recordBuffer.length
+          sampleCount: recordBuffer.length,
+          trajectory: { path: trajectory.path, finalPosition: { x: trajectory.x, y: trajectory.y }, stepLengthM: STEP_LENGTH_M }
         };
         const blob = new Blob([JSON.stringify({ meta, samples: recordBuffer }, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
@@ -375,6 +572,11 @@
       btnStart.addEventListener('click', startRecording);
       btnStop.addEventListener('click', stopRecording);
       btnDownload.addEventListener('click', downloadData);
+      btnResetAll.addEventListener('click', resetAll);
+      btnResetTrajectory.addEventListener('click', resetAll);
+
+      window.addEventListener('resize', function () { if (trajectory.path.length) drawTrajectory(); });
+      drawTrajectory();
 
       if (!window.DeviceMotionEvent) {
         setMessage('Device motion is not supported on this device/browser.', 'error');
