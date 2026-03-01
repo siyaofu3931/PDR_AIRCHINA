@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>PDR – IMU &amp; Steps Recorder</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --border: #2a2a32;
+      --text: #e8e8ec;
+      --muted: #888;
+      --accent: #4a9eff;
+      --success: #34c759;
+      --danger: #ff453a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 1rem;
+      padding-bottom: 2rem;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0 0 0.5rem;
+      color: var(--text);
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 1.5rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .card h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.35rem 0;
+      font-size: 0.9rem;
+    }
+    .row .label { color: var(--muted); }
+    .row .value {
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, monospace;
+    }
+    .steps-big {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-align: center;
+      padding: 0.5rem 0;
+    }
+    .buttons {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+    button {
+      flex: 1;
+      padding: 0.9rem 1rem;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-start {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-stop {
+      background: var(--danger);
+      color: #fff;
+    }
+    .btn-download {
+      background: var(--border);
+      color: var(--text);
+    }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      padding: 0.4rem 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+    }
+    .status.idle { background: var(--surface); color: var(--muted); }
+    .status.recording { background: rgba(255, 69, 58, 0.15); color: var(--danger); }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status.recording .status-dot {
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .message {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+    .message.error { color: var(--danger); }
+    .message.success { color: var(--success); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PDR Sensor Recorder</h1>
+    <p class="subtitle">Record IMU, gyro, magnetometer &amp; steps on your phone</p>
+
+    <div id="status" class="status idle">
+      <span class="status-dot"></span>
+      <span id="statusText">Tap Start to begin</span>
+    </div>
+
+    <div class="card">
+      <h2>Steps</h2>
+      <div class="steps-big" id="stepsCount">0</div>
+    </div>
+
+    <div class="card">
+      <h2>Acceleration (m/s²)</h2>
+      <div class="row"><span class="label">X</span><span class="value" id="accX">—</span></div>
+      <div class="row"><span class="label">Y</span><span class="value" id="accY">—</span></div>
+      <div class="row"><span class="label">Z</span><span class="value" id="accZ">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Gyro (deg/s)</h2>
+      <div class="row"><span class="label">α</span><span class="value" id="gyroAlpha">—</span></div>
+      <div class="row"><span class="label">β</span><span class="value" id="gyroBeta">—</span></div>
+      <div class="row"><span class="label">γ</span><span class="value" id="gyroGamma">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Orientation / Magnetometer</h2>
+      <div class="row"><span class="label">α (heading)</span><span class="value" id="orientAlpha">—</span></div>
+      <div class="row"><span class="label">β</span><span class="value" id="orientBeta">—</span></div>
+      <div class="row"><span class="label">γ</span><span class="value" id="orientGamma">—</span></div>
+    </div>
+
+    <p id="message" class="message"></p>
+
+    <div class="buttons">
+      <button id="btnStart" class="btn-start">Start</button>
+      <button id="btnStop" class="btn-stop" disabled>Stop</button>
+      <button id="btnDownload" class="btn-download" disabled>Download JSON</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const statusEl = document.getElementById('status');
+      const statusText = document.getElementById('statusText');
+      const stepsEl = document.getElementById('stepsCount');
+      const accX = document.getElementById('accX');
+      const accY = document.getElementById('accY');
+      const accZ = document.getElementById('accZ');
+      const gyroAlpha = document.getElementById('gyroAlpha');
+      const gyroBeta = document.getElementById('gyroBeta');
+      const gyroGamma = document.getElementById('gyroGamma');
+      const orientAlpha = document.getElementById('orientAlpha');
+      const orientBeta = document.getElementById('orientBeta');
+      const orientGamma = document.getElementById('orientGamma');
+      const messageEl = document.getElementById('message');
+      const btnStart = document.getElementById('btnStart');
+      const btnStop = document.getElementById('btnStop');
+      const btnDownload = document.getElementById('btnDownload');
+
+      let recording = false;
+      let recordBuffer = [];
+      let stepCount = 0;
+
+      // Step detection state
+      const stepConfig = {
+        threshold: 1.2,
+        minPeriodMs: 300,
+        lastStepTime: 0,
+        lastMagnitude: 0,
+        peakLock: false,
+        smoothing: 0.85
+      };
+      let smoothedMagnitude = 0;
+
+      function formatNum(n) {
+        if (n == null || Number.isNaN(n)) return '—';
+        return n.toFixed(2);
+      }
+
+      function setMessage(text, type) {
+        messageEl.textContent = text || '';
+        messageEl.className = 'message' + (type ? ' ' + type : '');
+      }
+
+      function stepDetect(accG) {
+        if (!accG || accG.x == null) return;
+        const mag = Math.sqrt(accG.x * accG.x + accG.y * accG.y + accG.z * accG.z);
+        smoothedMagnitude = stepConfig.smoothing * smoothedMagnitude + (1 - stepConfig.smoothing) * mag;
+        const now = Date.now();
+        if (smoothedMagnitude > stepConfig.threshold && !stepConfig.peakLock) {
+          if (now - stepConfig.lastStepTime >= stepConfig.minPeriodMs) {
+            stepCount++;
+            stepConfig.lastStepTime = now;
+            stepConfig.peakLock = true;
+          }
+        }
+        if (smoothedMagnitude < stepConfig.threshold * 0.8) stepConfig.peakLock = false;
+      }
+
+      function pushSample(motion, orientation) {
+        if (!recording) return;
+        const t = performance.now();
+        const ts = new Date().toISOString();
+        const acc = motion.acceleration || motion.accelerationIncludingGravity;
+        const accG = motion.accelerationIncludingGravity;
+        const rot = motion.rotationRate || {};
+        recordBuffer.push({
+          ts,
+          t,
+          acceleration: acc ? { x: acc.x, y: acc.y, z: acc.z } : null,
+          accelerationIncludingGravity: accG ? { x: accG.x, y: accG.y, z: accG.z } : null,
+          rotationRate: { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma },
+          orientation: orientation ? { alpha: orientation.alpha, beta: orientation.beta, gamma: orientation.gamma, absolute: orientation.absolute } : null,
+          steps: stepCount
+        });
+      }
+
+      let lastOrientation = null;
+
+      function onMotion(e) {
+        const acc = e.accelerationIncludingGravity;
+        if (acc) {
+          accX.textContent = formatNum(acc.x);
+          accY.textContent = formatNum(acc.y);
+          accZ.textContent = formatNum(acc.z);
+          stepDetect(acc);
+        }
+        const rot = e.rotationRate;
+        if (rot) {
+          gyroAlpha.textContent = formatNum(rot.alpha);
+          gyroBeta.textContent = formatNum(rot.beta);
+          gyroGamma.textContent = formatNum(rot.gamma);
+        }
+        stepsEl.textContent = String(stepCount);
+        pushSample(e, lastOrientation);
+      }
+
+      function onOrientation(e) {
+        lastOrientation = { alpha: e.alpha, beta: e.beta, gamma: e.gamma, absolute: e.absolute };
+        orientAlpha.textContent = formatNum(e.alpha);
+        orientBeta.textContent = formatNum(e.beta);
+        orientGamma.textContent = formatNum(e.gamma);
+      }
+
+      function startListeners() {
+        window.addEventListener('devicemotion', onMotion, { passive: true });
+        window.addEventListener('deviceorientation', onOrientation, { passive: true });
+      }
+
+      function stopListeners() {
+        window.removeEventListener('devicemotion', onMotion);
+        window.removeEventListener('deviceorientation', onOrientation);
+      }
+
+      async function requestPermission() {
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+          try {
+            const perm = await DeviceMotionEvent.requestPermission();
+            if (perm !== 'granted') {
+              setMessage('Motion permission denied.', 'error');
+              return false;
+            }
+          } catch (err) {
+            setMessage('Permission error: ' + err.message, 'error');
+            return false;
+          }
+        }
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          try {
+            const perm = await DeviceOrientationEvent.requestPermission();
+            if (perm !== 'granted') {
+              setMessage('Orientation permission denied.', 'error');
+              return false;
+            }
+          } catch (err) {
+            setMessage('Orientation permission error: ' + err.message, 'error');
+            return false;
+          }
+        }
+        return true;
+      }
+
+      async function startRecording() {
+        setMessage('Requesting sensor access…', '');
+        const ok = await requestPermission();
+        if (!ok) return;
+
+        recordBuffer = [];
+        stepCount = 0;
+        smoothedMagnitude = 0;
+        stepConfig.lastStepTime = 0;
+        stepConfig.peakLock = false;
+        recording = true;
+        startListeners();
+        statusEl.className = 'status recording';
+        statusText.textContent = 'Recording…';
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        btnDownload.disabled = false;
+        setMessage('Recording. Walk to count steps.', 'success');
+      }
+
+      function stopRecording() {
+        recording = false;
+        stopListeners();
+        statusEl.className = 'status idle';
+        statusText.textContent = 'Stopped';
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        setMessage('Stopped. You can download the recorded data.', '');
+      }
+
+      function downloadData() {
+        const meta = {
+          recordedAt: new Date().toISOString(),
+          durationMs: recordBuffer.length ? recordBuffer[recordBuffer.length - 1].t - recordBuffer[0].t : 0,
+          stepCount,
+          sampleCount: recordBuffer.length
+        };
+        const blob = new Blob([JSON.stringify({ meta, samples: recordBuffer }, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'pdr-sensor-log-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        setMessage('Download started.', 'success');
+      }
+
+      btnStart.addEventListener('click', startRecording);
+      btnStop.addEventListener('click', stopRecording);
+      btnDownload.addEventListener('click', downloadData);
+
+      if (!window.DeviceMotionEvent) {
+        setMessage('Device motion is not supported on this device/browser.', 'error');
+        btnStart.disabled = true;
+      }
+    })();
+  </script>
+</body>
+</html>
