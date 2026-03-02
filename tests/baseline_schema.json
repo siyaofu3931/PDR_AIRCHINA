@@ -1,0 +1,10 @@
+{
+  "description": "Baseline trajectory for APE/RPE evaluation. One position per step or per fixed interval.",
+  "format": "baseline_v1",
+  "recordedAt": "ISO8601",
+  "trajectory": [
+    { "t": "timestamp_ms_or_ISO", "x": 0, "y": 0 }
+  ],
+  "groundTruthDistanceM": 0,
+  "notes": "Compare with meta.trajectory_for_ape from exported PDR JSON; align by time or by step index for APE/RPE."
+}

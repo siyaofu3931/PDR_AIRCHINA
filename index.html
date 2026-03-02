@@ -255,7 +255,7 @@
       let stepCount = 0;
       let lastStepCountForTrajectory = 0;
 
-      // Trajectory state (PDR fusion: heading from orientation, position from steps)
+      // Trajectory state (PDR: heading from orientation, position from steps)
       const STEP_LENGTH_M = 0.7;
       let trajectory = {
         path: [{ x: 0, y: 0 }],
@@ -269,18 +269,20 @@
       const btnResetTrajectory = document.getElementById('btnResetTrajectory');
 
       // Step detection from IMU acceleration only (no native step API; works on iPhone/Android)
-      // Uses magnitude of acceleration + peak detection + baseline-relative threshold
+      // Peak detection + valley + min period between steps
       const stepConfig = {
-        minPeriodMs: 350,
-        peakMinRatio: 0.025,
+        minPeriodMs: 500,
+        peakMinRatio: 0.03,
         smoothing: 0.92,
-        baselineAlpha: 0.998
+        baselineAlpha: 0.998,
+        valleyRatio: 0.015
       };
       let smoothedMagnitude = 0;
       let magnitudeBaseline = 0;
       let lastMagnitude = 0;
       let rising = false;
       let lastStepTime = 0;
+      let hadValleySinceLastStep = false;
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -301,10 +303,16 @@
         const now = Date.now();
         const aboveBaseline = smoothedMagnitude - magnitudeBaseline;
         const minPeakHeight = magnitudeBaseline * stepConfig.peakMinRatio;
-        const isPeak = rising && lastMagnitude > smoothedMagnitude && aboveBaseline > minPeakHeight;
-        if (isPeak && now - lastStepTime >= stepConfig.minPeriodMs) {
+        const valleyThreshold = magnitudeBaseline * (1 - stepConfig.valleyRatio);
+        if (smoothedMagnitude < valleyThreshold) hadValleySinceLastStep = true;
+        const peakValueAboveBaseline = lastMagnitude - magnitudeBaseline;
+        const isPeak = rising && lastMagnitude > smoothedMagnitude
+          && aboveBaseline > minPeakHeight
+          && peakValueAboveBaseline > minPeakHeight;
+        if (isPeak && hadValleySinceLastStep && now - lastStepTime >= stepConfig.minPeriodMs) {
           stepCount++;
           lastStepTime = now;
+          hadValleySinceLastStep = false;
         }
         rising = smoothedMagnitude > lastMagnitude;
         lastMagnitude = smoothedMagnitude;
@@ -313,7 +321,6 @@
       function updateTrajectory() {
         if (stepCount <= lastStepCountForTrajectory) return;
         const newSteps = stepCount - lastStepCountForTrajectory;
-        lastStepCountForTrajectory = stepCount;
         let headingDeg = trajectory.headingDeg;
         if (lastOrientation != null && lastOrientation.alpha != null && !Number.isNaN(lastOrientation.alpha)) {
           headingDeg = lastOrientation.alpha;
@@ -326,6 +333,7 @@
           trajectory.y += STEP_LENGTH_M * Math.cos(rad);
           trajectory.path.push({ x: trajectory.x, y: trajectory.y });
         }
+        lastStepCountForTrajectory = stepCount;
         drawTrajectory();
         updateTrajectoryInfo();
       }
@@ -426,6 +434,7 @@
         lastMagnitude = 0;
         rising = false;
         lastStepTime = 0;
+        hadValleySinceLastStep = false;
         stepsEl.textContent = '0';
         drawTrajectory();
         updateTrajectoryInfo();
@@ -532,6 +541,7 @@
         lastMagnitude = 0;
         rising = false;
         lastStepTime = 0;
+        hadValleySinceLastStep = false;
         recording = true;
         startListeners();
         statusEl.className = 'status recording';

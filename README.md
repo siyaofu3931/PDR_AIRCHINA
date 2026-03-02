@@ -11,7 +11,7 @@ A single-page web app that records **IMU** (accelerometer), **gyroscope**, **mag
 | **Magnetometer / Compass** | `DeviceOrientationEvent` | α (heading), β, γ |
 | **Steps** | Computed from accelerometer only (no native step API on web) | Step count via peak detection on magnitude |
 
-Recorded samples are timestamped and can be downloaded as JSON. **Real-time trajectory** is computed by fusing **heading** (from orientation/compass) and **steps** (step count × step length) and drawn on a live 2D map.
+Recorded samples are timestamped and can be downloaded as JSON. **Real-time trajectory** uses **Weinberg** step length, **gyro+mag** heading fusion, and optional **heading offset** and **landmark** calibration. **Drift warning** prompts for calibration when heading diverges. **Behavior** tag: walk / run / elevator. Export includes `trajectory_for_ape` and `stepHistory` for baseline comparison (APE/RPE).
 
 ## How to use
 
@@ -107,7 +107,10 @@ On Android, Chrome may allow sensor access over HTTP in some cases; prefer HTTPS
 
 ## File layout
 
-- `index.html` — Single-page app: UI, permission handling, recording, step detection, and JSON download.
+- `index.html` — Single-page app: PDR (Weinberg step length, gyro+mag heading fusion), drift warning, landmark calibration, behavior tag, JSON download with trajectory for APE/RPE.
+- `docs/SOLUTION.md` — Full design: problem, system design, algorithm design (attitude, filtering, calibration, map matching, behavior, testing).
+- `docs/PROMPT_SUMMARY.md` — Prompt summary for iteration.
+- `tests/baseline_schema.json` — Schema for baseline trajectory (APE/RPE comparison).
 
 ## JSON export format
 
