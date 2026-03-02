@@ -296,6 +296,8 @@
       const FUSION_ALPHA_DISTURBED = 0.85;
       const GYRO_DRIFT_CORRECT_GAIN = 0.22;
       const MAG_JUMP_THRESHOLD_DEG = 25;
+      // Gyro alpha sign: 1 = W3C (positive = turn right). Use -1 if when you turn LEFT the trajectory turns RIGHT (e.g. some iOS).
+      const GYRO_ALPHA_SIGN = -1;
       let driftWarningCount = 0;
       const DRIFT_THRESHOLD_DEG = 35;
       const DRIFT_WARN_SAMPLES = 40;
@@ -374,6 +376,7 @@
         const headingDeg = (headingFusedDeg != null ? headingFusedDeg : (lastOrientation && lastOrientation.alpha != null ? lastOrientation.alpha : 0));
         trajectory.headingDeg = headingDeg;
         const rad = (headingDeg * Math.PI) / 180;
+        // Step in heading direction: 0° = North (+y), 90° = East (+x). Turn left → heading decreases → trajectory goes left on map.
         for (let i = 0; i < newSteps; i++) {
           const idx = lastStepCountForTrajectory + i;
           const stepLen = (idx < stepHistory.length && stepHistory[idx]) ? stepHistory[idx].stepLengthM : 0.7;
@@ -534,7 +537,7 @@
         if (rot && rot.alpha != null && !Number.isNaN(rot.alpha)) {
           if (lastGyroTime != null) {
             const dt = (now - lastGyroTime) / 1000;
-            headingGyroDeg += rot.alpha * dt;
+            headingGyroDeg += GYRO_ALPHA_SIGN * rot.alpha * dt;
             headingGyroDeg = normalizeAngle360(headingGyroDeg);
           }
           lastGyroTime = now;
