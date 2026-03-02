@@ -6,6 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>PDR – IMU &amp; Steps Recorder</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <style>
     :root {
       --bg: #0f0f12;
@@ -140,7 +142,7 @@
     .trajectory-card {
       overflow: hidden;
     }
-    .trajectory-canvas-wrap {
+    .trajectory-map-wrap {
       position: relative;
       width: 100%;
       height: 220px;
@@ -148,11 +150,11 @@
       border-radius: 8px;
       margin-top: 0.5rem;
     }
-    #trajectoryCanvas {
-      display: block;
+    #trajectoryMap {
       width: 100%;
       height: 100%;
-      touch-action: none;
+      border-radius: 8px;
+      z-index: 0;
     }
     .trajectory-actions {
       display: flex;
@@ -185,14 +187,16 @@
     </div>
 
     <div class="card">
-      <h2>Steps</h2>
+      <h2>Steps · Distance</h2>
       <div class="steps-big" id="stepsCount">0</div>
+      <div class="row"><span class="label">Distance (m)</span><span class="value" id="distanceDisplay">0.00</span></div>
     </div>
 
     <div class="card trajectory-card">
-      <h2>Trajectory (real-time)</h2>
-      <div class="trajectory-canvas-wrap">
-        <canvas id="trajectoryCanvas"></canvas>
+      <h2>Trajectory (OpenStreetMap)</h2>
+      <p class="message" style="margin-bottom:0.5rem">Tap the map to set <strong>your location</strong>, then tap Start.</p>
+      <div class="trajectory-map-wrap">
+        <div id="trajectoryMap"></div>
       </div>
       <div class="trajectory-actions">
         <span id="trajectoryInfo">x: 0 m, y: 0 m, heading: —°</span>
@@ -255,27 +259,55 @@
       let stepCount = 0;
       let lastStepCountForTrajectory = 0;
 
-      // Trajectory state (PDR: heading from orientation, position from steps)
-      const STEP_LENGTH_M = 0.7;
+      // Trajectory state (PDR Phase 1: Weinberg step length + fused heading)
       let trajectory = {
         path: [{ x: 0, y: 0 }],
         x: 0,
         y: 0,
         headingDeg: null
       };
-      const canvas = document.getElementById('trajectoryCanvas');
       const trajectoryInfo = document.getElementById('trajectoryInfo');
+      const mapContainer = document.getElementById('trajectoryMap');
+      let mapOriginLat = 37.6213;
+      let mapOriginLng = -122.3790;
+      const METERS_PER_DEG_LAT = 111320;
+      let map = null;
+      let trajectoryPolyline = null;
+      let positionMarker = null;
+      let originMarker = null;
       const btnResetAll = document.getElementById('btnResetAll');
       const btnResetTrajectory = document.getElementById('btnResetTrajectory');
+      const distanceDisplay = document.getElementById('distanceDisplay');
 
-      // Step detection from IMU acceleration only (no native step API; works on iPhone/Android)
-      // Peak detection + valley + min period between steps
+      // Weinberg: step_length = K_weinberg * (a_max - a_min)^0.25
+      let K_weinberg = 0.5;
+      let stepHistory = [];
+      let stepCycleAmax = 0;
+      let stepCycleAmin = 1e9;
+      let totalDistanceM = 0;
+
+      // Heading fusion: gyro integration + magnetometer complementary + drift correction
+      let headingGyroDeg = 0;
+      let lastGyroTime = null;
+      let headingFusedDeg = null;
+      let lastMagHeadingDeg = null;
+      let magReliability = 1;
+      const FUSION_ALPHA_STABLE = 0.45;
+      const FUSION_ALPHA_DISTURBED = 0.85;
+      const GYRO_DRIFT_CORRECT_GAIN = 0.22;
+      const MAG_JUMP_THRESHOLD_DEG = 25;
+      let driftWarningCount = 0;
+      const DRIFT_THRESHOLD_DEG = 35;
+      const DRIFT_WARN_SAMPLES = 40;
+
+      // Step detection: magnitude + peak/valley + min period; adaptive threshold from last N peaks
       const stepConfig = {
         minPeriodMs: 500,
         peakMinRatio: 0.03,
         smoothing: 0.92,
         baselineAlpha: 0.998,
-        valleyRatio: 0.015
+        valleyRatio: 0.015,
+        adaptivePeakWindow: 8
       };
       let smoothedMagnitude = 0;
       let magnitudeBaseline = 0;
@@ -283,6 +315,7 @@
       let rising = false;
       let lastStepTime = 0;
       let hadValleySinceLastStep = false;
+      let recentPeakHeights = [];
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -300,9 +333,16 @@
         if (magnitudeBaseline === 0) magnitudeBaseline = mag;
         smoothedMagnitude = stepConfig.smoothing * smoothedMagnitude + (1 - stepConfig.smoothing) * mag;
         magnitudeBaseline = stepConfig.baselineAlpha * magnitudeBaseline + (1 - stepConfig.baselineAlpha) * smoothedMagnitude;
+        stepCycleAmax = Math.max(stepCycleAmax, smoothedMagnitude);
+        stepCycleAmin = Math.min(stepCycleAmin, smoothedMagnitude);
         const now = Date.now();
         const aboveBaseline = smoothedMagnitude - magnitudeBaseline;
-        const minPeakHeight = magnitudeBaseline * stepConfig.peakMinRatio;
+        let minPeakHeight = magnitudeBaseline * stepConfig.peakMinRatio;
+        if (recentPeakHeights.length > 0) {
+          const mean = recentPeakHeights.reduce(function (a, b) { return a + b; }, 0) / recentPeakHeights.length;
+          const adaptive = Math.max(mean * 0.4, magnitudeBaseline * stepConfig.peakMinRatio);
+          minPeakHeight = Math.max(minPeakHeight, Math.min(adaptive, magnitudeBaseline * 0.08));
+        }
         const valleyThreshold = magnitudeBaseline * (1 - stepConfig.valleyRatio);
         if (smoothedMagnitude < valleyThreshold) hadValleySinceLastStep = true;
         const peakValueAboveBaseline = lastMagnitude - magnitudeBaseline;
@@ -310,9 +350,19 @@
           && aboveBaseline > minPeakHeight
           && peakValueAboveBaseline > minPeakHeight;
         if (isPeak && hadValleySinceLastStep && now - lastStepTime >= stepConfig.minPeriodMs) {
+          const delta = Math.max(stepCycleAmax - stepCycleAmin, 0.1);
+          const rawWeinberg = Math.pow(delta, 0.25);
+          let stepLengthM = K_weinberg * rawWeinberg;
+          stepLengthM = Math.max(0.2, Math.min(1.2, stepLengthM));
+          stepHistory.push({ stepIndex: stepCount + 1, a_max: stepCycleAmax, a_min: stepCycleAmin, stepLengthM, ts: now });
+          totalDistanceM += stepLengthM;
+          if (recentPeakHeights.length >= stepConfig.adaptivePeakWindow) recentPeakHeights.shift();
+          recentPeakHeights.push(peakValueAboveBaseline);
           stepCount++;
           lastStepTime = now;
           hadValleySinceLastStep = false;
+          stepCycleAmax = smoothedMagnitude;
+          stepCycleAmin = smoothedMagnitude;
         }
         rising = smoothedMagnitude > lastMagnitude;
         lastMagnitude = smoothedMagnitude;
@@ -321,27 +371,25 @@
       function updateTrajectory() {
         if (stepCount <= lastStepCountForTrajectory) return;
         const newSteps = stepCount - lastStepCountForTrajectory;
-        let headingDeg = trajectory.headingDeg;
-        if (lastOrientation != null && lastOrientation.alpha != null && !Number.isNaN(lastOrientation.alpha)) {
-          headingDeg = lastOrientation.alpha;
-          trajectory.headingDeg = headingDeg;
-        }
-        if (headingDeg == null) headingDeg = 0;
+        const headingDeg = (headingFusedDeg != null ? headingFusedDeg : (lastOrientation && lastOrientation.alpha != null ? lastOrientation.alpha : 0));
+        trajectory.headingDeg = headingDeg;
         const rad = (headingDeg * Math.PI) / 180;
         for (let i = 0; i < newSteps; i++) {
-          trajectory.x += STEP_LENGTH_M * Math.sin(rad);
-          trajectory.y += STEP_LENGTH_M * Math.cos(rad);
+          const idx = lastStepCountForTrajectory + i;
+          const stepLen = (idx < stepHistory.length && stepHistory[idx]) ? stepHistory[idx].stepLengthM : 0.7;
+          trajectory.x += stepLen * Math.sin(rad);
+          trajectory.y += stepLen * Math.cos(rad);
           trajectory.path.push({ x: trajectory.x, y: trajectory.y });
         }
         lastStepCountForTrajectory = stepCount;
         drawTrajectory();
         updateTrajectoryInfo();
+        if (distanceDisplay) distanceDisplay.textContent = totalDistanceM.toFixed(2);
       }
 
       function updateTrajectoryHeadingOnly() {
-        if (lastOrientation != null && lastOrientation.alpha != null && !Number.isNaN(lastOrientation.alpha)) {
-          trajectory.headingDeg = lastOrientation.alpha;
-        }
+        const h = headingFusedDeg != null ? headingFusedDeg : (lastOrientation && lastOrientation.alpha != null ? lastOrientation.alpha : null);
+        if (h != null) trajectory.headingDeg = h;
         drawTrajectory();
         updateTrajectoryInfo();
       }
@@ -349,79 +397,69 @@
       function updateTrajectoryInfo() {
         const h = trajectory.headingDeg != null ? trajectory.headingDeg.toFixed(0) : '—';
         trajectoryInfo.textContent = 'x: ' + trajectory.x.toFixed(2) + ' m, y: ' + trajectory.y.toFixed(2) + ' m, heading: ' + h + '°';
+        if (distanceDisplay) distanceDisplay.textContent = totalDistanceM.toFixed(2);
+      }
+
+      function metersToLatLng(xM, yM) {
+        const lat = mapOriginLat + (yM / METERS_PER_DEG_LAT);
+        const lng = mapOriginLng + (xM / (METERS_PER_DEG_LAT * Math.cos(mapOriginLat * Math.PI / 180)));
+        return [lat, lng];
+      }
+
+      function setMapOrigin(lat, lng) {
+        mapOriginLat = lat;
+        mapOriginLng = lng;
+        if (originMarker) originMarker.setLatLng([lat, lng]);
+        if (map && !recording) map.setView([lat, lng], map.getZoom());
+        updateMapTrajectory();
+      }
+
+      function initMap() {
+        if (!mapContainer || map !== null) return;
+        map = L.map('trajectoryMap', { zoomControl: true }).setView([mapOriginLat, mapOriginLng], 18);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+        originMarker = L.circleMarker([mapOriginLat, mapOriginLng], {
+          radius: 10,
+          fillColor: '#34c759',
+          color: '#e8e8ec',
+          weight: 2,
+          fillOpacity: 0.9
+        }).addTo(map).bindTooltip('You are here', { permanent: false, direction: 'top' });
+        trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.9 }).addTo(map);
+        positionMarker = L.circleMarker([mapOriginLat, mapOriginLng], {
+          radius: 8,
+          fillColor: '#ff453a',
+          color: '#e8e8ec',
+          weight: 2,
+          fillOpacity: 1
+        }).addTo(map);
+        map.on('click', function (e) {
+          if (recording) return;
+          setMapOrigin(e.latlng.lat, e.latlng.lng);
+          setMessage('Location set. Tap Start when ready.', 'success');
+        });
+      }
+
+      function updateMapTrajectory() {
+        if (!map || !trajectoryPolyline || !positionMarker) return;
+        const pts = trajectory.path;
+        const latlngs = pts.map(function (p) { return metersToLatLng(p.x, p.y); });
+        trajectoryPolyline.setLatLngs(latlngs);
+        const current = metersToLatLng(trajectory.x, trajectory.y);
+        positionMarker.setLatLng(current);
+        if (latlngs.length >= 2) {
+          const bounds = L.latLngBounds(latlngs);
+          map.fitBounds(bounds.pad(0.15));
+        } else {
+          map.setView([mapOriginLat, mapOriginLng], 18);
+        }
       }
 
       function drawTrajectory() {
-        const dpr = window.devicePixelRatio || 1;
-        const wrap = canvas.parentElement;
-        const w = wrap.clientWidth;
-        const h = wrap.clientHeight;
-        if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-          canvas.width = w * dpr;
-          canvas.height = h * dpr;
-          canvas.style.width = w + 'px';
-          canvas.style.height = h + 'px';
-        }
-        const ctx = canvas.getContext('2d');
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.scale(dpr, dpr);
-        const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0f0f12';
-        const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4a9eff';
-        const danger = getComputedStyle(document.documentElement).getPropertyValue('--danger').trim() || '#ff453a';
-        const text = getComputedStyle(document.documentElement).getPropertyValue('--text').trim() || '#e8e8ec';
-        ctx.fillStyle = bg;
-        ctx.fillRect(0, 0, w, h);
-        const pts = trajectory.path;
-        if (pts.length < 2) {
-          ctx.fillStyle = accent;
-          ctx.beginPath();
-          ctx.arc(w / 2, h / 2, 6, 0, Math.PI * 2);
-          ctx.fill();
-          return;
-        }
-        let minX = pts[0].x, maxX = pts[0].x, minY = pts[0].y, maxY = pts[0].y;
-        for (let i = 1; i < pts.length; i++) {
-          minX = Math.min(minX, pts[i].x);
-          maxX = Math.max(maxX, pts[i].x);
-          minY = Math.min(minY, pts[i].y);
-          maxY = Math.max(maxY, pts[i].y);
-        }
-        const pad = 40;
-        const rangeX = Math.max(maxX - minX, 0.2);
-        const rangeY = Math.max(maxY - minY, 0.2);
-        const scale = Math.min((w - pad * 2) / rangeX, (h - pad * 2) / rangeY) * 0.95;
-        const cx = (minX + maxX) / 2;
-        const cy = (minY + maxY) / 2;
-        const sx = w / 2 - cx * scale;
-        const sy = h / 2 + cy * scale;
-        ctx.strokeStyle = accent;
-        ctx.lineWidth = 2;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        ctx.moveTo(sx + pts[0].x * scale, sy - pts[0].y * scale);
-        for (let i = 1; i < pts.length; i++) {
-          ctx.lineTo(sx + pts[i].x * scale, sy - pts[i].y * scale);
-        }
-        ctx.stroke();
-        const rx = sx + trajectory.x * scale;
-        const ry = sy - trajectory.y * scale;
-        ctx.fillStyle = danger;
-        ctx.beginPath();
-        ctx.arc(rx, ry, 8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = text;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        if (trajectory.headingDeg != null) {
-          const rad = (trajectory.headingDeg * Math.PI) / 180;
-          const len = 20;
-          ctx.strokeStyle = text;
-          ctx.beginPath();
-          ctx.moveTo(rx, ry);
-          ctx.lineTo(rx + len * Math.sin(rad), ry - len * Math.cos(rad));
-          ctx.stroke();
-        }
+        if (map === null) initMap();
+        updateMapTrajectory();
       }
 
       function resetAll() {
@@ -429,13 +467,20 @@
         lastStepCountForTrajectory = 0;
         trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: trajectory.headingDeg };
         recordBuffer = [];
+        stepHistory = [];
+        totalDistanceM = 0;
+        stepCycleAmax = 0;
+        stepCycleAmin = 1e9;
+        recentPeakHeights = [];
         smoothedMagnitude = 0;
         magnitudeBaseline = 0;
         lastMagnitude = 0;
         rising = false;
         lastStepTime = 0;
         hadValleySinceLastStep = false;
+        driftWarningCount = 0;
         stepsEl.textContent = '0';
+        if (distanceDisplay) distanceDisplay.textContent = '0.00';
         drawTrajectory();
         updateTrajectoryInfo();
         setMessage('Reset to initial state.', '');
@@ -456,11 +501,25 @@
           rotationRate: { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma },
           orientation: orientation ? { alpha: orientation.alpha, beta: orientation.beta, gamma: orientation.gamma, absolute: orientation.absolute } : null,
           steps: stepCount,
-          position: { x: trajectory.x, y: trajectory.y }
+          position: { x: trajectory.x, y: trajectory.y },
+          heading_fused: headingFusedDeg
         });
       }
 
       let lastOrientation = null;
+
+      function normalizeAngle360(deg) {
+        let d = deg % 360;
+        if (d < 0) d += 360;
+        return d;
+      }
+
+      function angularDiffDeg(fromDeg, toDeg) {
+        let d = normalizeAngle360(toDeg) - normalizeAngle360(fromDeg);
+        if (d > 180) d -= 360;
+        if (d < -180) d += 360;
+        return d;
+      }
 
       function onMotion(e) {
         const acc = e.accelerationIncludingGravity;
@@ -471,7 +530,14 @@
           stepDetect(acc);
         }
         const rot = e.rotationRate;
-        if (rot) {
+        const now = Date.now();
+        if (rot && rot.alpha != null && !Number.isNaN(rot.alpha)) {
+          if (lastGyroTime != null) {
+            const dt = (now - lastGyroTime) / 1000;
+            headingGyroDeg += rot.alpha * dt;
+            headingGyroDeg = normalizeAngle360(headingGyroDeg);
+          }
+          lastGyroTime = now;
           gyroAlpha.textContent = formatNum(rot.alpha);
           gyroBeta.textContent = formatNum(rot.beta);
           gyroGamma.textContent = formatNum(rot.gamma);
@@ -486,6 +552,28 @@
         orientAlpha.textContent = formatNum(e.alpha);
         orientBeta.textContent = formatNum(e.beta);
         orientGamma.textContent = formatNum(e.gamma);
+        if (e.alpha != null && !Number.isNaN(e.alpha)) {
+          const magDeg = normalizeAngle360(e.alpha);
+          if (lastGyroTime == null) {
+            headingGyroDeg = magDeg;
+            headingFusedDeg = magDeg;
+            lastMagHeadingDeg = magDeg;
+          } else {
+            const magJump = lastMagHeadingDeg != null ? Math.abs(angularDiffDeg(lastMagHeadingDeg, magDeg)) : 0;
+            if (magJump > MAG_JUMP_THRESHOLD_DEG) magReliability = FUSION_ALPHA_DISTURBED;
+            else magReliability = FUSION_ALPHA_STABLE;
+            lastMagHeadingDeg = magDeg;
+            headingGyroDeg += GYRO_DRIFT_CORRECT_GAIN * angularDiffDeg(headingGyroDeg, magDeg);
+            headingGyroDeg = normalizeAngle360(headingGyroDeg);
+          }
+          const diff = Math.abs(angularDiffDeg(headingGyroDeg, magDeg));
+          if (diff > DRIFT_THRESHOLD_DEG) {
+            driftWarningCount++;
+            if (driftWarningCount >= DRIFT_WARN_SAMPLES) setMessage('Possible heading drift. Consider calibrating at a landmark.', 'error');
+          } else driftWarningCount = 0;
+          headingFusedDeg = magReliability * headingGyroDeg + (1 - magReliability) * magDeg;
+          headingFusedDeg = normalizeAngle360(headingFusedDeg);
+        }
         updateTrajectoryHeadingOnly();
       }
 
@@ -536,6 +624,16 @@
         stepCount = 0;
         lastStepCountForTrajectory = 0;
         trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: null };
+        stepHistory = [];
+        totalDistanceM = 0;
+        stepCycleAmax = 0;
+        stepCycleAmin = 1e9;
+        recentPeakHeights = [];
+        headingGyroDeg = 0;
+        lastGyroTime = null;
+        headingFusedDeg = null;
+        lastMagHeadingDeg = null;
+        driftWarningCount = 0;
         smoothedMagnitude = 0;
         magnitudeBaseline = 0;
         lastMagnitude = 0;
@@ -563,12 +661,21 @@
       }
 
       function downloadData() {
+        const trajectoryForApe = trajectory.path.map(function (p, i) {
+          const sh = i > 0 ? stepHistory[i - 1] : null;
+          return { t: sh ? sh.ts : null, x: p.x, y: p.y };
+        });
         const meta = {
           recordedAt: new Date().toISOString(),
           durationMs: recordBuffer.length ? recordBuffer[recordBuffer.length - 1].t - recordBuffer[0].t : 0,
           stepCount,
           sampleCount: recordBuffer.length,
-          trajectory: { path: trajectory.path, finalPosition: { x: trajectory.x, y: trajectory.y }, stepLengthM: STEP_LENGTH_M }
+          totalDistanceM: totalDistanceM,
+          weinbergK: K_weinberg,
+          mapOrigin: { lat: mapOriginLat, lng: mapOriginLng },
+          trajectory: { path: trajectory.path, finalPosition: { x: trajectory.x, y: trajectory.y } },
+          stepHistory: stepHistory,
+          trajectory_for_ape: trajectoryForApe
         };
         const blob = new Blob([JSON.stringify({ meta, samples: recordBuffer }, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
@@ -585,7 +692,11 @@
       btnResetAll.addEventListener('click', resetAll);
       btnResetTrajectory.addEventListener('click', resetAll);
 
-      window.addEventListener('resize', function () { if (trajectory.path.length) drawTrajectory(); });
+      window.addEventListener('resize', function () {
+        drawTrajectory();
+        if (map) map.invalidateSize();
+      });
+      if (mapContainer) initMap();
       drawTrajectory();
 
       if (!window.DeviceMotionEvent) {
