@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>PDR – SFO Map-Matched POC (v2)</title>
+
+  <!-- Leaflet (OSM base map) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --border: #2a2a32;
+      --text: #e8e8ec;
+      --muted: #888;
+      --accent: #4a9eff;
+      --success: #34c759;
+      --danger: #ff453a;
+      --warn: #ff9f0a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .container {
+      max-width: 560px;
+      margin: 0 auto;
+      padding: 1rem;
+      padding-bottom: 2rem;
+    }
+    h1 {
+      font-size: 1.15rem;
+      font-weight: 650;
+      margin: 0 0 0.25rem;
+      color: var(--text);
+    }
+    .subtitle {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 1rem;
+      line-height: 1.35;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.1rem;
+      margin-bottom: 0.9rem;
+    }
+    .card h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.35rem 0;
+      font-size: 0.92rem;
+      gap: 0.75rem;
+    }
+    .row .label { color: var(--muted); white-space: nowrap; }
+    .row .value {
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, monospace;
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 70%;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .pill.ok { color: var(--success); border-color: rgba(52,199,89,0.35); }
+    .pill.warn { color: var(--warn); border-color: rgba(255,159,10,0.35); }
+    .pill.bad { color: var(--danger); border-color: rgba(255,69,58,0.35); }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      padding: 0.4rem 0.75rem;
+      border-radius: 8px;
+      margin-bottom: 0.85rem;
+      border: 1px solid var(--border);
+    }
+    .status.idle { background: var(--surface); color: var(--muted); }
+    .status.recording { background: rgba(255, 69, 58, 0.12); color: var(--danger); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .status.recording .status-dot { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+    .buttons {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 0.9rem;
+      flex-wrap: wrap;
+    }
+    button {
+      flex: 1;
+      min-width: 120px;
+      padding: 0.85rem 0.9rem;
+      font-size: 0.95rem;
+      font-weight: 650;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-start { background: var(--accent); color: #fff; }
+    .btn-stop { background: var(--danger); color: #fff; }
+    .btn-secondary { background: var(--border); color: var(--text); }
+    .btn-warn { background: rgba(255,159,10,0.2); color: var(--warn); border: 1px solid rgba(255,159,10,0.35); }
+    .btn-danger-secondary { background: rgba(255,69,58,0.15); color: var(--danger); border: 1px solid rgba(255,69,58,0.35); }
+
+    .message {
+      font-size: 0.86rem;
+      color: var(--muted);
+      margin: 0.25rem 0 0.2rem;
+      line-height: 1.35;
+    }
+    .message.error { color: var(--danger); }
+    .message.success { color: var(--success); }
+    .message.warn { color: var(--warn); }
+
+    .map-wrap {
+      position: relative;
+      width: 100%;
+      height: 300px;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0b0b0d;
+      border: 1px solid var(--border);
+    }
+    #map { width: 100%; height: 100%; }
+    .map-hud {
+      position: absolute;
+      left: 10px;
+      top: 10px;
+      display: grid;
+      gap: 6px;
+      z-index: 500;
+    }
+
+    .traj-mini { overflow: hidden; }
+    .traj-mini-wrap {
+      position: relative;
+      width: 100%;
+      height: 180px;
+      background: var(--bg);
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+    #trajectoryCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
+
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+    @media (max-width: 520px) { .grid2 { grid-template-columns: 1fr; } }
+
+    input[type="number"], input[type="text"], select {
+      width: 100%;
+      padding: 0.55rem 0.6rem;
+      background: #111116;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      color: var(--text);
+      font-size: 0.95rem;
+      outline: none;
+    }
+    .small { font-size: 0.78rem; color: var(--muted); line-height: 1.35; }
+    .file-row {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .file-row input[type="file"] { flex: 1; min-width: 180px; }
+    pre {
+      margin: 0.6rem 0 0;
+      padding: 0.75rem;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0b0b0d;
+      color: #cfcfda;
+      overflow: auto;
+      max-height: 190px;
+      font-size: 0.78rem;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .kbd {
+      font-family: ui-monospace, monospace;
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      background: rgba(255,255,255,0.03);
+      padding: 0.1rem 0.35rem;
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.78rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>PDR – SFO Map-Matched POC (v2)</h1>
+    <p class="subtitle">
+      Dead Reckoning on phone IMU with <span class="kbd">pose-robust step detection</span>, <span class="kbd">gyro+compass heading fusion</span>,
+      and <span class="kbd">OSM walkway snapping</span>. Designed for SFO-like corridor topology.
+      <br/>Build timestamp: 2026-03-02 06:53:21Z
+    </p>
+
+    <div id="status" class="status idle">
+      <span class="status-dot"></span>
+      <span id="statusText">Tap Start to begin</span>
+    </div>
+
+    <div class="card">
+      <h2>Map (OpenStreetMap)</h2>
+      <div class="map-wrap">
+        <div id="map"></div>
+        <div class="map-hud">
+          <span id="pillCompass" class="pill warn"><span class="dot"></span><span>Compass: —</span></span>
+          <span id="pillSnap" class="pill warn"><span class="dot"></span><span>Snap: off</span></span>
+          <span id="pillPose" class="pill warn"><span class="dot"></span><span>Pose: —</span></span>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button id="btnLoadOSM" class="btn-secondary">Load SFO OSM walkways</button>
+        <button id="btnLoadPOI" class="btn-secondary">Load POIs (landmarks)</button>
+        <button id="btnUseGPS" class="btn-secondary">Use GPS as start</button>
+        <button id="btnClearMap" class="btn-danger-secondary">Clear map</button>
+      </div>
+      <p class="small">
+        ① Click on map to set <b>Start</b> (origin). ② Set heading using <b>Set heading</b>. ③ Walk.
+        If OSM indoor corridors are sparse, snapping may only work on footways/paths available in OSM.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Control</h2>
+      <div class="grid2">
+        <div>
+          <div class="row"><span class="label">Steps</span><span class="value" id="stepsCount">0</span></div>
+          <div class="row"><span class="label">Cadence</span><span class="value" id="cadence">—</span></div>
+          <div class="row"><span class="label">Step length</span><span class="value" id="stepLen">—</span></div>
+          <div class="row"><span class="label">Heading (fused)</span><span class="value" id="headingFused">—</span></div>
+          <div class="row"><span class="label">Snap residual</span><span class="value" id="snapResidual">—</span></div>
+        </div>
+        <div>
+          <label class="small">Heading offset (deg, +clockwise). Use to align to map if needed.</label>
+          <input id="inputHeadingOffset" type="number" step="1" value="0" />
+          <div style="height:8px"></div>
+
+          <label class="small">Weinberg K (step length scale)</label>
+          <input id="inputK" type="number" step="0.01" value="0.45" />
+          <div style="height:8px"></div>
+
+          <div class="buttons" style="margin-top:0.3rem">
+            <button id="btnSetHeading" class="btn-secondary">Set heading (now)</button>
+            <button id="btnToggleSnap" class="btn-warn">Toggle snapping</button>
+          </div>
+        </div>
+      </div>
+
+      <p id="message" class="message"></p>
+
+      <div class="buttons">
+        <button id="btnStart" class="btn-start">Start</button>
+        <button id="btnStop" class="btn-stop" disabled>Stop</button>
+        <button id="btnResetAll" class="btn-secondary">Reset</button>
+        <button id="btnDownload" class="btn-secondary" disabled>Download JSON</button>
+      </div>
+    </div>
+
+    <div class="card traj-mini">
+      <h2>Trajectory (local XY debug)</h2>
+      <div class="traj-mini-wrap">
+        <canvas id="trajectoryCanvas"></canvas>
+      </div>
+      <div class="row"><span class="label">Local</span><span class="value" id="trajInfo">x: 0.00 m, y: 0.00 m</span></div>
+      <p class="small">Local XY is relative to the chosen start point. Map overlay uses lat/lon conversion from the same origin.</p>
+    </div>
+
+    <div class="card">
+      <h2>Landmark anchoring</h2>
+      <div class="row">
+        <span class="label">POI</span>
+        <select id="selectPOI">
+          <option value="">(Load POIs first)</option>
+        </select>
+      </div>
+      <div class="buttons">
+        <button id="btnAnchorPOI" class="btn-secondary">Anchor to POI</button>
+        <button id="btnAnchorMapClick" class="btn-secondary">Anchor to clicked point</button>
+      </div>
+      <p class="small">
+        Anchoring resets accumulated drift between landmarks. If you anchor twice, the app can auto-adjust <b>K</b> using the known map distance
+        between anchors (basic online calibration).
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Raw sensors (for debugging)</h2>
+      <div class="grid2">
+        <div>
+          <div class="row"><span class="label">Acc (inc g)</span><span class="value" id="acc">—</span></div>
+          <div class="row"><span class="label">Lin acc</span><span class="value" id="linAcc">—</span></div>
+          <div class="row"><span class="label">Step signal</span><span class="value" id="stepSig">—</span></div>
+        </div>
+        <div>
+          <div class="row"><span class="label">Gyro</span><span class="value" id="gyro">—</span></div>
+          <div class="row"><span class="label">Compass</span><span class="value" id="compass">—</span></div>
+          <div class="row"><span class="label">State</span><span class="value" id="state">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Evaluation (APE/RPE-like, log vs log)</h2>
+      <div class="file-row">
+        <input id="fileBaseline" type="file" accept="application/json" />
+        <input id="fileTest" type="file" accept="application/json" />
+        <button id="btnEval" class="btn-secondary" style="flex:0 0 auto; min-width:120px;">Compare</button>
+      </div>
+      <p class="small">
+        Pick two exported JSON logs (baseline as reference). Computes APE over aligned step index, and RPE over k-step windows.
+      </p>
+      <pre id="evalOut">(no evaluation yet)</pre>
+    </div>
+
+    <div class="card">
+      <h2>Self-test demo (no sensors)</h2>
+      <div class="buttons">
+        <button id="btnSim" class="btn-secondary">Simulate 60 steps</button>
+        <button id="btnExportGraph" class="btn-secondary">Export fetched walkways GeoJSON</button>
+      </div>
+      <p class="small">
+        This simulates steps in a square path so you can validate rendering + snapping + logging logic on desktop.
+      </p>
+      <pre id="debugLog">(log)</pre>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // ----------------------------
+      // Utilities
+      // ----------------------------
+      const R_EARTH = 6378137; // meters
+      function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+      function deg2rad(d) { return d * Math.PI / 180; }
+      function rad2deg(r) { return r * 180 / Math.PI; }
+      function wrapRad(r) {
+        while (r <= -Math.PI) r += 2 * Math.PI;
+        while (r > Math.PI) r -= 2 * Math.PI;
+        return r;
+      }
+      function wrapDeg(d) {
+        d = d % 360;
+        if (d < 0) d += 360;
+        return d;
+      }
+      function fmt(n, k=2) {
+        if (n == null || Number.isNaN(n)) return '—';
+        return Number(n).toFixed(k);
+      }
+      function haversineMeters(a, b) {
+        const lat1 = deg2rad(a.lat), lon1 = deg2rad(a.lng);
+        const lat2 = deg2rad(b.lat), lon2 = deg2rad(b.lng);
+        const dlat = lat2 - lat1;
+        const dlon = lon2 - lon1;
+        const s1 = Math.sin(dlat/2), s2 = Math.sin(dlon/2);
+        const h = s1*s1 + Math.cos(lat1)*Math.cos(lat2) * s2*s2;
+        return 2 * R_EARTH * Math.asin(Math.sqrt(clamp(h, 0, 1)));
+      }
+      function ll2xy(lat, lon, origin) {
+        // x east, y north
+        const dLat = deg2rad(lat - origin.lat);
+        const dLon = deg2rad(lon - origin.lng);
+        const x = dLon * Math.cos(deg2rad(origin.lat)) * R_EARTH;
+        const y = dLat * R_EARTH;
+        return { x, y };
+      }
+      function xy2ll(x, y, origin) {
+        const lat = origin.lat + rad2deg(y / R_EARTH);
+        const lon = origin.lng + rad2deg(x / (R_EARTH * Math.cos(deg2rad(origin.lat))));
+        return { lat, lng: lon };
+      }
+      function closestPointOnSegment(p, a, b) {
+        // p,a,b are in XY meters
+        const vx = b.x - a.x, vy = b.y - a.y;
+        const wx = p.x - a.x, wy = p.y - a.y;
+        const vv = vx*vx + vy*vy;
+        const t = vv > 1e-9 ? clamp((wx*vx + wy*vy)/vv, 0, 1) : 0;
+        const cx = a.x + t*vx, cy = a.y + t*vy;
+        const dx = p.x - cx, dy = p.y - cy;
+        return {
+          x: cx, y: cy, t,
+          dist: Math.sqrt(dx*dx + dy*dy),
+          bearingRad: Math.atan2(vx, vy) // from north, clockwise (since x=east,y=north)
+        };
+      }
+      function toLabel(tags) {
+        if (!tags) return '(poi)';
+        const name = tags.name || tags.ref || tags.operator || tags.brand;
+        if (name) return name;
+        if (tags.aeroway === 'gate' && tags.ref) return 'Gate ' + tags.ref;
+        if (tags.amenity) return tags.amenity;
+        if (tags.shop) return tags.shop;
+        if (tags.tourism) return tags.tourism;
+        return '(poi)';
+      }
+
+      // ----------------------------
+      // UI refs
+      // ----------------------------
+      const statusEl = document.getElementById('status');
+      const statusText = document.getElementById('statusText');
+      const messageEl = document.getElementById('message');
+
+      const stepsCountEl = document.getElementById('stepsCount');
+      const cadenceEl = document.getElementById('cadence');
+      const stepLenEl = document.getElementById('stepLen');
+      const headingFusedEl = document.getElementById('headingFused');
+      const snapResidualEl = document.getElementById('snapResidual');
+
+      const accEl = document.getElementById('acc');
+      const linAccEl = document.getElementById('linAcc');
+      const stepSigEl = document.getElementById('stepSig');
+      const gyroEl = document.getElementById('gyro');
+      const compassEl = document.getElementById('compass');
+      const stateEl = document.getElementById('state');
+
+      const pillCompass = document.getElementById('pillCompass');
+      const pillSnap = document.getElementById('pillSnap');
+      const pillPose = document.getElementById('pillPose');
+
+      const inputHeadingOffset = document.getElementById('inputHeadingOffset');
+      const inputK = document.getElementById('inputK');
+
+      const btnStart = document.getElementById('btnStart');
+      const btnStop = document.getElementById('btnStop');
+      const btnDownload = document.getElementById('btnDownload');
+      const btnResetAll = document.getElementById('btnResetAll');
+
+      const btnLoadOSM = document.getElementById('btnLoadOSM');
+      const btnLoadPOI = document.getElementById('btnLoadPOI');
+      const btnUseGPS = document.getElementById('btnUseGPS');
+      const btnClearMap = document.getElementById('btnClearMap');
+      const btnToggleSnap = document.getElementById('btnToggleSnap');
+      const btnSetHeading = document.getElementById('btnSetHeading');
+
+      const selectPOI = document.getElementById('selectPOI');
+      const btnAnchorPOI = document.getElementById('btnAnchorPOI');
+      const btnAnchorMapClick = document.getElementById('btnAnchorMapClick');
+
+      const trajInfo = document.getElementById('trajInfo');
+      const evalOut = document.getElementById('evalOut');
+      const fileBaseline = document.getElementById('fileBaseline');
+      const fileTest = document.getElementById('fileTest');
+      const btnEval = document.getElementById('btnEval');
+
+      const debugLog = document.getElementById('debugLog');
+      const btnSim = document.getElementById('btnSim');
+      const btnExportGraph = document.getElementById('btnExportGraph');
+
+      function log(line) {
+        const ts = new Date().toISOString().slice(11,19);
+        debugLog.textContent = `[${ts}] ${line}\n` + debugLog.textContent;
+      }
+      function setMessage(text, type) {
+        messageEl.textContent = text || '';
+        messageEl.className = 'message' + (type ? ' ' + type : '');
+      }
+
+      // ----------------------------
+      // Map init (Leaflet)
+      // ----------------------------
+      const map = L.map('map', {
+        zoomControl: true,
+        attributionControl: true,
+        preferCanvas: true
+      });
+      // SFO center
+      const sfoCenter = [37.6167, -122.3875];
+      map.setView(sfoCenter, 16);
+
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 20,
+        attribution: '&copy; OpenStreetMap contributors'
+      }).addTo(map);
+
+      const layerWalkways = L.layerGroup().addTo(map);
+      const layerPOI = L.layerGroup().addTo(map);
+      const layerPath = L.layerGroup().addTo(map);
+
+      let startMarker = null;
+      let lastMapClickLatLng = null;
+
+      let pathPolyline = L.polyline([], { weight: 4, opacity: 0.9 }).addTo(layerPath);
+      let currentMarker = L.circleMarker(sfoCenter, { radius: 6, opacity: 1, fillOpacity: 1 }).addTo(layerPath);
+
+      map.on('click', (e) => {
+        lastMapClickLatLng = e.latlng;
+        if (!startMarker) {
+          startMarker = L.marker(e.latlng, { draggable: true }).addTo(layerPath);
+          startMarker.bindPopup('Start (origin)').openPopup();
+          startMarker.on('dragend', () => {
+            const ll = startMarker.getLatLng();
+            setOrigin(ll.lat, ll.lng, true);
+          });
+          setOrigin(e.latlng.lat, e.latlng.lng, true);
+          setMessage('Start set. Now press "Set heading (now)" and walk.', 'success');
+        } else {
+          log(`Map click: ${fmt(e.latlng.lat, 6)}, ${fmt(e.latlng.lng, 6)}`);
+        }
+      });
+
+      // ----------------------------
+      // OSM / Overpass
+      // ----------------------------
+      const OSM = {
+        loaded: false,
+        bbox: { s: 37.606, w: -122.405, n: 37.635, e: -122.365 },
+        nodes: new Map(),
+        walkways: [], // array of { id, coords:[{lat,lng}...] , tags }
+        poi: [] // array of { id, latlng, tags }
+      };
+
+      const OVERPASS_ENDPOINTS = [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter'
+      ];
+
+      async function fetchOverpass(query) {
+        const body = new URLSearchParams();
+        body.set('data', query);
+        let lastErr = null;
+        for (const url of OVERPASS_ENDPOINTS) {
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+              body
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return await res.json();
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        throw lastErr || new Error('Overpass fetch failed');
+      }
+
+      async function loadWalkways() {
+        setMessage('Loading OSM walkways from Overpass…', '');
+        const b = OSM.bbox;
+        const q = `
+          [out:json][timeout:25];
+          (
+            way["highway"~"corridor|footway|path|pedestrian|steps"](${b.s},${b.w},${b.n},${b.e});
+            way["indoor"="corridor"](${b.s},${b.w},${b.n},${b.e});
+            node["aeroway"="gate"](${b.s},${b.w},${b.n},${b.e});
+          );
+          out body;
+          >;
+          out skel qt;
+        `;
+        try {
+          const json = await fetchOverpass(q);
+          parseOverpass(json, { keepPOI: false });
+          drawWalkways();
+          setMessage(`Loaded ${OSM.walkways.length} ways (walkways/steps/corridors).`, 'success');
+          log(`OSM walkways loaded: ${OSM.walkways.length} ways`);
+        } catch (e) {
+          setMessage('Failed to load OSM walkways: ' + e.message, 'error');
+        }
+      }
+
+      async function loadPOI() {
+        setMessage('Loading POIs (landmarks) from Overpass…', '');
+        const b = OSM.bbox;
+        const q = `
+          [out:json][timeout:25];
+          (
+            node["aeroway"="gate"](${b.s},${b.w},${b.n},${b.e});
+            node["amenity"](${b.s},${b.w},${b.n},${b.e});
+            node["shop"](${b.s},${b.w},${b.n},${b.e});
+            node["tourism"](${b.s},${b.w},${b.n},${b.e});
+          );
+          out body;
+        `;
+        try {
+          const json = await fetchOverpass(q);
+          parseOverpass(json, { keepWalkways: false });
+          drawPOI();
+          setMessage(`Loaded ${OSM.poi.length} POIs.`, 'success');
+          log(`OSM POIs loaded: ${OSM.poi.length} nodes`);
+        } catch (e) {
+          setMessage('Failed to load POIs: ' + e.message, 'error');
+        }
+      }
+
+      function parseOverpass(json, opts={}) {
+        const keepWalkways = opts.keepWalkways !== false;
+        const keepPOI = opts.keepPOI !== false;
+        const nodes = OSM.nodes;
+        for (const el of (json.elements || [])) {
+          if (el.type === 'node' && el.lat != null && el.lon != null) {
+            nodes.set(el.id, { lat: el.lat, lng: el.lon, tags: el.tags || null });
+          }
+        }
+        if (keepWalkways) {
+          const ways = [];
+          for (const el of (json.elements || [])) {
+            if (el.type !== 'way') continue;
+            const tags = el.tags || {};
+            const hw = tags.highway;
+            const indoor = tags.indoor;
+            const isWalk = (hw && ['corridor','footway','path','pedestrian','steps'].includes(hw)) || (indoor === 'corridor');
+            if (!isWalk) continue;
+            const coords = [];
+            for (const nid of (el.nodes || [])) {
+              const n = nodes.get(nid);
+              if (n) coords.push({ lat: n.lat, lng: n.lng });
+            }
+            if (coords.length >= 2) ways.push({ id: el.id, coords, tags });
+          }
+          OSM.walkways = ways;
+          OSM.loaded = true;
+        }
+        if (keepPOI) {
+          const poi = [];
+          for (const el of (json.elements || [])) {
+            if (el.type !== 'node') continue;
+            const tags = el.tags || null;
+            if (!tags) continue;
+            if (tags.aeroway === 'gate' || tags.amenity || tags.shop || tags.tourism) {
+              poi.push({ id: el.id, latlng: { lat: el.lat, lng: el.lon }, tags });
+            }
+          }
+          const seen = new Set();
+          const uniq = [];
+          for (const p of poi) {
+            if (seen.has(p.id)) continue;
+            seen.add(p.id);
+            uniq.push(p);
+          }
+          OSM.poi = uniq.slice(0, 400);
+          OSM.loaded = true;
+        }
+      }
+
+      function drawWalkways() {
+        layerWalkways.clearLayers();
+        if (!OSM.walkways.length) return;
+        for (const w of OSM.walkways) {
+          const color = (w.tags && w.tags.highway === 'steps') ? '#ff9f0a' : '#4a9eff';
+          L.polyline(w.coords.map(c => [c.lat, c.lng]), {
+            weight: 2,
+            opacity: 0.55,
+            color
+          }).addTo(layerWalkways);
+        }
+      }
+
+      function drawPOI() {
+        layerPOI.clearLayers();
+        selectPOI.innerHTML = '<option value="">(Select a POI)</option>';
+        if (!OSM.poi.length) return;
+        const list = OSM.poi.slice().sort((a,b) => toLabel(a.tags).localeCompare(toLabel(b.tags)));
+        for (const p of list) {
+          const label = toLabel(p.tags);
+          const opt = document.createElement('option');
+          opt.value = String(p.id);
+          opt.textContent = label + ` (${fmt(p.latlng.lat,5)},${fmt(p.latlng.lng,5)})`;
+          selectPOI.appendChild(opt);
+
+          const m = L.circleMarker([p.latlng.lat, p.latlng.lng], {
+            radius: 4,
+            weight: 1,
+            opacity: 1,
+            fillOpacity: 0.8
+          }).addTo(layerPOI);
+          m.bindPopup(label);
+        }
+      }
+
+      function exportWalkwaysGeoJSON() {
+        if (!OSM.walkways.length) {
+          setMessage('No walkways loaded.', 'warn');
+          return;
+        }
+        const fc = {
+          type: 'FeatureCollection',
+          features: OSM.walkways.map(w => ({
+            type: 'Feature',
+            properties: Object.assign({ id: w.id }, (w.tags || {})),
+            geometry: {
+              type: 'LineString',
+              coordinates: w.coords.map(c => [c.lng, c.lat])
+            }
+          }))
+        };
+        const blob = new Blob([JSON.stringify(fc, null, 2)], { type: 'application/geo+json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'sfo-walkways-' + new Date().toISOString().slice(0,19).replace(/:/g,'-') + '.geojson';
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+
+      // ----------------------------
+      // PDR state
+      // ----------------------------
+      let recording = false;
+      let recordBuffer = [];
+
+      let origin = null; // {lat,lng} once user sets start
+      let trajectory = {
+        x: 0, y: 0,
+        pathXY: [{ x:0, y:0 }],
+        pathLL: []
+      };
+
+      const stepCfg = {
+        minPeriodMs: 280,
+        maxPeriodMs: 1300,
+        gravityAlpha: 0.92,
+        sigSmoothAlpha: 0.86,
+        dynWin: 30,
+        thrK: 2.2,
+        thrMin: 0.12
+      };
+      let steps = 0;
+      let lastStepT = 0;
+      let stepIntervals = []; // ms
+      let gravity = { x:0, y:0, z:0 };
+      let lin = { x:0, y:0, z:0 };
+      let stepSig = 0;
+      let sigHist = [];
+      let lastSig = 0;
+      let rising = false;
+      let curStepMax = -1e9;
+      let curStepMin = +1e9;
+      let lastStepFeature = 0;
+      let stepLen = 0.7;
+      let K = 0.45;
+
+      let headingGyro = 0; // rad
+      let headingMagDeg = null; // deg
+      let headingFused = 0; // rad
+      let lastMotionMs = null;
+      let magTrust = 0.0;
+      let headingOffsetDeg = 0; // user
+      let hasCompass = false;
+
+      let snappingEnabled = true;
+      const snapCfg = { maxSnapM: 6.0, badSnapM: 10.0 };
+      let lastSnapResidual = null;
+      let lastSnapBearing = null;
+      let driftScore = 0;
+
+      let lastAnchor = null; // {latlng, stepIndex}
+
+      function setOrigin(lat, lng, resetLocal) {
+        origin = { lat, lng };
+        if (resetLocal) {
+          trajectory = { x:0, y:0, pathXY:[{x:0,y:0}], pathLL:[{lat, lng}] };
+          pathPolyline.setLatLngs([[lat, lng]]);
+          currentMarker.setLatLng([lat, lng]);
+          updateMiniCanvas();
+        }
+        if (startMarker) startMarker.setLatLng([lat, lng]);
+        log(`Origin set: ${fmt(lat,6)}, ${fmt(lng,6)}`);
+      }
+
+      function getPoseLabelFromGravity(g) {
+        const m = Math.sqrt(g.x*g.x + g.y*g.y + g.z*g.z) || 1;
+        const ax = Math.abs(g.x/m), ay = Math.abs(g.y/m), az = Math.abs(g.z/m);
+        if (az > 0.78) return 'hand/flat';
+        if (ay > 0.78) return 'pocket/upright';
+        if (ax > 0.78) return 'landscape';
+        return 'unknown';
+      }
+
+      function updatePills() {
+        if (hasCompass && headingMagDeg != null) {
+          pillCompass.className = 'pill ok';
+          pillCompass.innerHTML = '<span class="dot"></span><span>Compass: ok</span>';
+        } else {
+          pillCompass.className = 'pill warn';
+          pillCompass.innerHTML = '<span class="dot"></span><span>Compass: weak</span>';
+        }
+
+        if (!snappingEnabled) {
+          pillSnap.className = 'pill warn';
+          pillSnap.innerHTML = '<span class="dot"></span><span>Snap: off</span>';
+        } else if (lastSnapResidual == null) {
+          pillSnap.className = 'pill warn';
+          pillSnap.innerHTML = '<span class="dot"></span><span>Snap: on</span>';
+        } else if (lastSnapResidual <= snapCfg.maxSnapM) {
+          pillSnap.className = 'pill ok';
+          pillSnap.innerHTML = '<span class="dot"></span><span>Snap: ok</span>';
+        } else {
+          pillSnap.className = 'pill bad';
+          pillSnap.innerHTML = '<span class="dot"></span><span>Snap: weak</span>';
+        }
+
+        const pose = getPoseLabelFromGravity(gravity);
+        pillPose.className = pose === 'unknown' ? 'pill warn' : 'pill ok';
+        pillPose.innerHTML = '<span class="dot"></span><span>Pose: ' + pose + '</span>';
+      }
+
+      function updateMiniCanvas() {
+        trajInfo.textContent = `x: ${trajectory.x.toFixed(2)} m, y: ${trajectory.y.toFixed(2)} m`;
+        drawTrajectoryMini();
+      }
+
+      // ----------------------------
+      // Mini local XY canvas (debug)
+      // ----------------------------
+      const canvas = document.getElementById('trajectoryCanvas');
+      function drawTrajectoryMini() {
+        const dpr = window.devicePixelRatio || 1;
+        const wrap = canvas.parentElement;
+        const w = wrap.clientWidth;
+        const h = wrap.clientHeight;
+        if (canvas.width !== w*dpr || canvas.height !== h*dpr) {
+          canvas.width = w*dpr;
+          canvas.height = h*dpr;
+          canvas.style.width = w+'px';
+          canvas.style.height = h+'px';
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(1,0,0,1,0,0);
+        ctx.scale(dpr,dpr);
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0f0f12';
+        ctx.fillRect(0,0,w,h);
+
+        const pts = trajectory.pathXY;
+        if (pts.length < 2) {
+          ctx.fillStyle = '#4a9eff';
+          ctx.beginPath();
+          ctx.arc(w/2,h/2,5,0,Math.PI*2);
+          ctx.fill();
+          return;
+        }
+        let minX=pts[0].x, maxX=pts[0].x, minY=pts[0].y, maxY=pts[0].y;
+        for (let i=1;i<pts.length;i++) {
+          minX=Math.min(minX,pts[i].x); maxX=Math.max(maxX,pts[i].x);
+          minY=Math.min(minY,pts[i].y); maxY=Math.max(maxY,pts[i].y);
+        }
+        const pad=28;
+        const rx = Math.max(maxX-minX,0.2);
+        const ry = Math.max(maxY-minY,0.2);
+        const scale = Math.min((w-pad*2)/rx,(h-pad*2)/ry)*0.95;
+        const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+        const sx = w/2 - cx*scale;
+        const sy = h/2 + cy*scale;
+
+        ctx.strokeStyle = '#4a9eff';
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(sx + pts[0].x*scale, sy - pts[0].y*scale);
+        for (let i=1;i<pts.length;i++) {
+          ctx.lineTo(sx + pts[i].x*scale, sy - pts[i].y*scale);
+        }
+        ctx.stroke();
+
+        const px = sx + trajectory.x*scale;
+        const py = sy - trajectory.y*scale;
+        ctx.fillStyle = '#ff453a';
+        ctx.beginPath();
+        ctx.arc(px, py, 7, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // ----------------------------
+      // Step detection
+      // ----------------------------
+      function updateGravity(accIncG) {
+        const a = stepCfg.gravityAlpha;
+        gravity.x = a*gravity.x + (1-a)*accIncG.x;
+        gravity.y = a*gravity.y + (1-a)*accIncG.y;
+        gravity.z = a*gravity.z + (1-a)*accIncG.z;
+        const gx = gravity.x, gy = gravity.y, gz = gravity.z;
+        const gnorm = Math.sqrt(gx*gx + gy*gy + gz*gz) || 1;
+        const gUnit = { x: gx/gnorm, y: gy/gnorm, z: gz/gnorm };
+        lin.x = accIncG.x - gravity.x;
+        lin.y = accIncG.y - gravity.y;
+        lin.z = accIncG.z - gravity.z;
+        return gUnit;
+      }
+
+      function dynStats(arr) {
+        if (!arr.length) return { mean:0, std:0 };
+        let s=0; for (const v of arr) s += v;
+        const mean = s/arr.length;
+        let v=0; for (const x of arr) v += (x-mean)*(x-mean);
+        const std = Math.sqrt(v/Math.max(1,arr.length-1));
+        return { mean, std };
+      }
+
+      function getCadenceHz() {
+        if (stepIntervals.length < 2) return NaN;
+        const avg = stepIntervals.reduce((a,b)=>a+b,0)/stepIntervals.length;
+        return 1000/avg;
+      }
+
+      function stepDetectFrom(accIncG, tMs) {
+        const gUnit = updateGravity(accIncG);
+
+        const vertical = -(lin.x*gUnit.x + lin.y*gUnit.y + lin.z*gUnit.z);
+        const sigRaw = Math.abs(vertical);
+
+        const sA = stepCfg.sigSmoothAlpha;
+        stepSig = sA*stepSig + (1-sA)*sigRaw;
+
+        curStepMax = Math.max(curStepMax, stepSig);
+        curStepMin = Math.min(curStepMin, stepSig);
+
+        sigHist.push(stepSig);
+        if (sigHist.length > stepCfg.dynWin) sigHist.shift();
+        const { mean, std } = dynStats(sigHist);
+        const thr = Math.max(stepCfg.thrMin, mean + stepCfg.thrK * std);
+
+        const above = stepSig - mean;
+        const isPeak = rising && (lastSig > stepSig) && (lastSig > thr) && (above > 0);
+        const dt = tMs - lastStepT;
+
+        if (isPeak && dt >= stepCfg.minPeriodMs && dt <= stepCfg.maxPeriodMs) {
+          steps++;
+          if (lastStepT > 0) {
+            stepIntervals.push(dt);
+            if (stepIntervals.length > 8) stepIntervals.shift();
+          }
+          lastStepT = tMs;
+
+          const delta = Math.max(0, curStepMax - curStepMin);
+          lastStepFeature = Math.pow(Math.max(delta, 1e-6), 0.25);
+          K = clamp(parseFloat(inputK.value || '0.45'), 0.20, 1.20);
+
+          const freqHz = getCadenceHz();
+          const cadenceFactor = clamp(0.85 + 0.18*(freqHz - 1.6), 0.75, 1.15);
+          stepLen = clamp(K * lastStepFeature * cadenceFactor + 0.25, 0.35, 1.20);
+
+          curStepMax = -1e9;
+          curStepMin = +1e9;
+
+          return true;
+        }
+        rising = stepSig > lastSig;
+        lastSig = stepSig;
+        return false;
+      }
+
+      // ----------------------------
+      // Heading
+      // ----------------------------
+      function updateHeadingFromGyro(rotRate, gUnit, tMs) {
+        if (!rotRate) return;
+        if (lastMotionMs == null) {
+          lastMotionMs = tMs;
+          return;
+        }
+        const dt = (tMs - lastMotionMs) / 1000;
+        lastMotionMs = tMs;
+        if (dt <= 0 || dt > 0.2) return;
+
+        const wx = deg2rad(rotRate.beta || 0);
+        const wy = deg2rad(rotRate.gamma || 0);
+        const wz = deg2rad(rotRate.alpha || 0);
+        const omega = { x: wx, y: wy, z: wz };
+        const yawRate = -(omega.x*gUnit.x + omega.y*gUnit.y + omega.z*gUnit.z);
+        headingGyro = wrapRad(headingGyro + yawRate * dt);
+
+        if (headingMagDeg != null) {
+          const magRad = deg2rad(wrapDeg(headingMagDeg + headingOffsetDeg));
+          const innov = wrapRad(magRad - headingGyro);
+          const absInnov = Math.abs(innov);
+          magTrust = clamp(1 - absInnov / deg2rad(45), 0, 1);
+          const k = 0.02 * magTrust;
+          headingGyro = wrapRad(headingGyro + k * innov);
+        }
+        headingFused = headingGyro;
+
+        if (snappingEnabled && lastSnapBearing != null && lastSnapResidual != null && lastSnapResidual <= snapCfg.maxSnapM) {
+          const seg = lastSnapBearing;
+          const innovSeg = wrapRad(seg - headingFused);
+          const kSeg = 0.10;
+          headingFused = wrapRad(headingFused + kSeg * innovSeg);
+          headingGyro = headingFused;
+        }
+      }
+
+      function getHeadingDeg() { return wrapDeg(rad2deg(headingFused)); }
+
+      // ----------------------------
+      // Map matching: snap to nearest walkway segment
+      // ----------------------------
+      function snapToWalkways(predLL) {
+        if (!origin || !OSM.walkways.length) return null;
+        const p = ll2xy(predLL.lat, predLL.lng, origin);
+        let best = null;
+        for (const w of OSM.walkways) {
+          const coords = w.coords;
+          for (let i=0;i<coords.length-1;i++) {
+            const aLL = coords[i], bLL = coords[i+1];
+            const a = ll2xy(aLL.lat, aLL.lng, origin);
+            const b = ll2xy(bLL.lat, bLL.lng, origin);
+            const c = closestPointOnSegment(p, a, b);
+            if (!best || c.dist < best.dist) {
+              best = { dist: c.dist, x: c.x, y: c.y, bearingRad: c.bearingRad, wayId: w.id };
+            }
+          }
+        }
+        if (!best) return null;
+        if (best.dist > snapCfg.badSnapM) return null;
+        return best;
+      }
+
+      // ----------------------------
+      // Trajectory
+      // ----------------------------
+      function applyStepUpdate() {
+        const h = deg2rad(getHeadingDeg());
+        trajectory.x += stepLen * Math.sin(h);
+        trajectory.y += stepLen * Math.cos(h);
+        trajectory.pathXY.push({ x: trajectory.x, y: trajectory.y });
+
+        if (origin) {
+          let ll = xy2ll(trajectory.x, trajectory.y, origin);
+          lastSnapBearing = null;
+          lastSnapResidual = null;
+
+          if (snappingEnabled) {
+            const snap = snapToWalkways(ll);
+            if (snap && snap.dist <= snapCfg.badSnapM) {
+              lastSnapResidual = snap.dist;
+              lastSnapBearing = snap.bearingRad;
+              if (snap.dist <= snapCfg.maxSnapM) {
+                trajectory.x = snap.x;
+                trajectory.y = snap.y;
+                ll = xy2ll(trajectory.x, trajectory.y, origin);
+                trajectory.pathXY[trajectory.pathXY.length - 1] = { x: trajectory.x, y: trajectory.y };
+              }
+            }
+          }
+
+          trajectory.pathLL.push(ll);
+          pathPolyline.addLatLng([ll.lat, ll.lng]);
+          currentMarker.setLatLng([ll.lat, ll.lng]);
+        }
+
+        updateMiniCanvas();
+        updateUIAfterStep();
+        updateDriftScore();
+      }
+
+      function updateDriftScore() {
+        let s = 0;
+        if (snappingEnabled && lastSnapResidual != null) {
+          if (lastSnapResidual > snapCfg.maxSnapM) s += 1.0;
+          if (lastSnapResidual > snapCfg.badSnapM) s += 2.0;
+        }
+        if (headingMagDeg != null && magTrust < 0.35) s += 0.5;
+        driftScore = clamp(0.8*driftScore + 0.2*s, 0, 3);
+        if (driftScore > 1.2) {
+          setMessage('Drift risk ↑. Suggest: anchor to a nearby POI / re-set heading / keep phone pose stable.', 'warn');
+        }
+      }
+
+      function inferMotionState() {
+        const hz = getCadenceHz();
+        if (!Number.isNaN(hz) && hz > 2.3) return 'running?';
+        const now = performance.now();
+        const since = (lastStepT > 0) ? (now - lastStepT) : 1e9;
+        const linMag = Math.sqrt(lin.x*lin.x + lin.y*lin.y + lin.z*lin.z);
+        if (since > 2000 && linMag < 0.15) return 'stationary';
+        return 'walking';
+      }
+
+      function updateUIAfterStep() {
+        stepsCountEl.textContent = String(steps);
+        const hz = getCadenceHz();
+        cadenceEl.textContent = Number.isNaN(hz) ? '—' : (hz.toFixed(2) + ' Hz');
+        stepLenEl.textContent = stepLen.toFixed(2) + ' m';
+        headingFusedEl.textContent = getHeadingDeg().toFixed(0) + '°';
+        snapResidualEl.textContent = (lastSnapResidual == null) ? '—' : (lastSnapResidual.toFixed(1) + ' m');
+        updatePills();
+      }
+
+      let lastGyroStr = null;
+      function updateUIStreaming() {
+        linAccEl.textContent = `x:${fmt(lin.x)}, y:${fmt(lin.y)}, z:${fmt(lin.z)}`;
+        stepSigEl.textContent = fmt(stepSig, 3);
+        gyroEl.textContent = lastGyroStr || '—';
+        compassEl.textContent = headingMagDeg == null ? '—' : (wrapDeg(headingMagDeg).toFixed(0) + '°');
+        stateEl.textContent = inferMotionState();
+        updatePills();
+      }
+
+      // ----------------------------
+      // Anchoring + K calibration
+      // ----------------------------
+      function anchorTo(latlng, reason) {
+        if (!origin) {
+          setOrigin(latlng.lat, latlng.lng, true);
+        } else {
+          const currentLL = xy2ll(trajectory.x, trajectory.y, origin);
+          const dx = ll2xy(latlng.lat, latlng.lng, currentLL).x;
+          const dy = ll2xy(latlng.lat, latlng.lng, currentLL).y;
+          const originXY = ll2xy(origin.lat, origin.lng, currentLL);
+          const newOriginXY = { x: originXY.x - dx, y: originXY.y - dy };
+          const newOriginLL = xy2ll(newOriginXY.x, newOriginXY.y, currentLL);
+          origin = { lat: newOriginLL.lat, lng: newOriginLL.lng };
+          if (startMarker) startMarker.setLatLng([origin.lat, origin.lng]);
+        }
+
+        if (lastAnchor) {
+          const dist = haversineMeters(lastAnchor.latlng, latlng);
+          const stepDelta = Math.max(1, steps - lastAnchor.stepIndex);
+          const avgStep = dist / stepDelta;
+
+          const feat = Math.max(lastStepFeature, 0.7);
+          const hz = getCadenceHz();
+          const cadenceFactor = Number.isNaN(hz) ? 1.0 : clamp(0.85 + 0.18*(hz - 1.6), 0.75, 1.15);
+          const kNew = clamp((avgStep - 0.25) / (feat * cadenceFactor), 0.20, 1.20);
+          K = 0.8 * K + 0.2 * kNew;
+          inputK.value = K.toFixed(2);
+
+          log(`Anchor calibrate: dist=${dist.toFixed(1)}m steps=${stepDelta} avg=${avgStep.toFixed(2)}m K->${K.toFixed(2)}`);
+          setMessage(`Anchored (${reason}). Auto-calibrated K≈${K.toFixed(2)} using dist≈${dist.toFixed(1)}m over ${stepDelta} steps.`, 'success');
+        } else {
+          setMessage(`Anchored (${reason}).`, 'success');
+        }
+        lastAnchor = { latlng, stepIndex: steps };
+        driftScore = 0;
+      }
+
+      // ----------------------------
+      // Recording
+      // ----------------------------
+      function pushSample(tMs, rawAcc) {
+        if (!recording) return;
+        const ts = new Date().toISOString();
+        const posLL = origin ? xy2ll(trajectory.x, trajectory.y, origin) : null;
+        recordBuffer.push({
+          ts,
+          tMs,
+          steps,
+          pose: getPoseLabelFromGravity(gravity),
+          accIncludingG: rawAcc ? { x: rawAcc.x, y: rawAcc.y, z: rawAcc.z } : null,
+          gravity: { x: gravity.x, y: gravity.y, z: gravity.z },
+          linAcc: { x: lin.x, y: lin.y, z: lin.z },
+          stepSignal: stepSig,
+          cadenceHz: getCadenceHz(),
+          stepLenM: stepLen,
+          K,
+          heading: {
+            magDeg: headingMagDeg,
+            gyroDeg: wrapDeg(rad2deg(headingGyro)),
+            fusedDeg: getHeadingDeg(),
+            magTrust
+          },
+          snap: {
+            enabled: snappingEnabled,
+            residualM: lastSnapResidual,
+            segBearingDeg: lastSnapBearing == null ? null : wrapDeg(rad2deg(lastSnapBearing))
+          },
+          position: {
+            x: trajectory.x, y: trajectory.y,
+            lat: posLL ? posLL.lat : null,
+            lng: posLL ? posLL.lng : null
+          },
+          state: inferMotionState()
+        });
+      }
+
+      function downloadData() {
+        const meta = {
+          recordedAt: new Date().toISOString(),
+          stepCount: steps,
+          sampleCount: recordBuffer.length,
+          origin,
+          headingOffsetDeg,
+          snappingEnabled,
+          K
+        };
+        const out = {
+          meta,
+          trajectory: {
+            pathXY: trajectory.pathXY,
+            pathLL: trajectory.pathLL
+          },
+          samples: recordBuffer
+        };
+        const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'pdr-sfo-log-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        setMessage('Download started.', 'success');
+      }
+
+      // ----------------------------
+      // Device sensors
+      // ----------------------------
+      function onMotion(e) {
+        const tMs = performance.now();
+        const acc = e.accelerationIncludingGravity;
+        if (acc && acc.x != null) {
+          const accIncG = { x: acc.x, y: acc.y, z: acc.z };
+          const gUnit = updateGravity(accIncG);
+          accEl.textContent = `x:${fmt(accIncG.x)}, y:${fmt(accIncG.y)}, z:${fmt(accIncG.z)}`;
+
+          if (e.rotationRate) {
+            lastGyroStr = `α:${fmt(e.rotationRate.alpha)}, β:${fmt(e.rotationRate.beta)}, γ:${fmt(e.rotationRate.gamma)}`;
+            updateHeadingFromGyro(e.rotationRate, gUnit, tMs);
+          }
+
+          const stepped = stepDetectFrom(accIncG, tMs);
+          if (stepped) applyStepUpdate();
+
+          pushSample(tMs, accIncG);
+          updateUIStreaming();
+        }
+      }
+
+      function onOrientation(e) {
+        // iOS Safari: prefer webkitCompassHeading for true heading
+        if (typeof e.webkitCompassHeading === 'number' && !Number.isNaN(e.webkitCompassHeading)) {
+          headingMagDeg = e.webkitCompassHeading;
+          hasCompass = true;
+        } else if (e.absolute === true && typeof e.alpha === 'number' && !Number.isNaN(e.alpha)) {
+          headingMagDeg = e.alpha;
+          hasCompass = true;
+        } else {
+          // iOS "game-based" alpha (absolute=false) not reliable for world heading
+        }
+        updatePills();
+      }
+
+      function startListeners() {
+        window.addEventListener('devicemotion', onMotion, { passive: true });
+        window.addEventListener('deviceorientation', onOrientation, { passive: true });
+      }
+      function stopListeners() {
+        window.removeEventListener('devicemotion', onMotion);
+        window.removeEventListener('deviceorientation', onOrientation);
+      }
+
+      async function requestPermission() {
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+          try {
+            const perm = await DeviceMotionEvent.requestPermission();
+            if (perm !== 'granted') { setMessage('Motion permission denied.', 'error'); return false; }
+          } catch (err) { setMessage('Motion permission error: ' + err.message, 'error'); return false; }
+        }
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          try {
+            const perm = await DeviceOrientationEvent.requestPermission();
+            if (perm !== 'granted') { setMessage('Orientation permission denied.', 'error'); return false; }
+          } catch (err) { setMessage('Orientation permission error: ' + err.message, 'error'); return false; }
+        }
+        return true;
+      }
+
+      async function startRecording() {
+        setMessage('Requesting sensor access…', '');
+        const ok = await requestPermission();
+        if (!ok) return;
+
+        recording = true;
+        recordBuffer = [];
+        steps = 0;
+        lastStepT = 0;
+        stepIntervals = [];
+        stepSig = 0; sigHist = []; lastSig = 0; rising = false;
+        gravity = {x:0,y:0,z:0}; lin = {x:0,y:0,z:0};
+        curStepMax = -1e9; curStepMin = +1e9; lastStepFeature = 0;
+        stepLen = 0.7;
+        K = clamp(parseFloat(inputK.value || '0.45'), 0.20, 1.20);
+
+        headingOffsetDeg = parseFloat(inputHeadingOffset.value || '0') || 0;
+        headingGyro = deg2rad(wrapDeg((headingMagDeg != null ? headingMagDeg : 0) + headingOffsetDeg));
+        headingFused = headingGyro;
+        lastMotionMs = null;
+        magTrust = 0.0;
+        driftScore = 0;
+
+        trajectory = { x:0, y:0, pathXY:[{x:0,y:0}], pathLL: origin ? [{lat: origin.lat, lng: origin.lng}] : [] };
+        pathPolyline.setLatLngs(origin ? [[origin.lat, origin.lng]] : []);
+        if (origin) currentMarker.setLatLng([origin.lat, origin.lng]);
+
+        statusEl.className = 'status recording';
+        statusText.textContent = 'Recording…';
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        btnDownload.disabled = false;
+
+        startListeners();
+        updateMiniCanvas();
+        updateUIAfterStep();
+        setMessage('Recording. Walk normally. If drift risk shows, anchor at a POI.', 'success');
+        log('Recording started');
+      }
+
+      function stopRecording() {
+        recording = false;
+        stopListeners();
+        statusEl.className = 'status idle';
+        statusText.textContent = 'Stopped';
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        setMessage('Stopped. You can download the recorded data.', '');
+        log('Recording stopped');
+      }
+
+      function resetAll() {
+        recording = false;
+        stopListeners();
+        steps = 0;
+        trajectory = { x:0, y:0, pathXY:[{x:0,y:0}], pathLL: [] };
+        recordBuffer = [];
+        pathPolyline.setLatLngs([]);
+        if (origin) currentMarker.setLatLng([origin.lat, origin.lng]);
+        updateMiniCanvas();
+        stepsCountEl.textContent = '0';
+        setMessage('Reset done.', '');
+        log('Reset');
+      }
+
+      // ----------------------------
+      // Evaluation (APE/RPE-like)
+      // ----------------------------
+      function readJsonFile(file) {
+        return new Promise((resolve, reject) => {
+          const fr = new FileReader();
+          fr.onload = () => {
+            try { resolve(JSON.parse(String(fr.result))); } catch (e) { reject(e); }
+          };
+          fr.onerror = () => reject(new Error('File read error'));
+          fr.readAsText(file);
+        });
+      }
+
+      function stats(arr) {
+        if (!arr.length) return null;
+        const s = arr.slice().sort((a,b)=>a-b);
+        const mean = arr.reduce((a,b)=>a+b,0)/arr.length;
+        const p50 = s[Math.floor(0.5*(s.length-1))];
+        const p90 = s[Math.floor(0.9*(s.length-1))];
+        const max = s[s.length-1];
+        return { mean, p50, p90, max, n: arr.length };
+      }
+
+      function evalAPE_RPE(base, test) {
+        const b = (base.trajectory && base.trajectory.pathXY) ? base.trajectory.pathXY : null;
+        const t = (test.trajectory && test.trajectory.pathXY) ? test.trajectory.pathXY : null;
+        if (!b || !t || b.length < 2 || t.length < 2) throw new Error('trajectory.pathXY missing in one file');
+
+        const n = Math.min(b.length, t.length);
+        const b0 = b[0], t0 = t[0];
+        const ape = [];
+        for (let i=0;i<n;i++) {
+          const dx = (t[i].x - t0.x) - (b[i].x - b0.x);
+          const dy = (t[i].y - t0.y) - (b[i].y - b0.y);
+          ape.push(Math.sqrt(dx*dx + dy*dy));
+        }
+
+        const k = 10;
+        const rpe = [];
+        for (let i=0;i+k<n;i++) {
+          const bdx = b[i+k].x - b[i].x;
+          const bdy = b[i+k].y - b[i].y;
+          const tdx = t[i+k].x - t[i].x;
+          const tdy = t[i+k].y - t[i].y;
+          const dx = (tdx - bdx);
+          const dy = (tdy - bdy);
+          rpe.push(Math.sqrt(dx*dx + dy*dy));
+        }
+        return { ape: stats(ape), rpe: stats(rpe) };
+      }
+
+      async function runEval() {
+        if (!fileBaseline.files[0] || !fileTest.files[0]) {
+          evalOut.textContent = 'Please select both baseline and test JSON files.';
+          return;
+        }
+        try {
+          const base = await readJsonFile(fileBaseline.files[0]);
+          const test = await readJsonFile(fileTest.files[0]);
+          const r = evalAPE_RPE(base, test);
+          evalOut.textContent =
+            `APE (aligned by start):\n` +
+            `  n=${r.ape.n} mean=${r.ape.mean.toFixed(2)}m  p50=${r.ape.p50.toFixed(2)}m  p90=${r.ape.p90.toFixed(2)}m  max=${r.ape.max.toFixed(2)}m\n\n` +
+            `RPE (k=10 steps window):\n` +
+            `  n=${r.rpe.n} mean=${r.rpe.mean.toFixed(2)}m  p50=${r.rpe.p50.toFixed(2)}m  p90=${r.rpe.p90.toFixed(2)}m  max=${r.rpe.max.toFixed(2)}m\n`;
+        } catch (e) {
+          evalOut.textContent = 'Eval failed: ' + e.message;
+        }
+      }
+
+      // ----------------------------
+      // Self-test simulation
+      // ----------------------------
+      async function simulateSteps() {
+        if (!origin) {
+          setOrigin(sfoCenter[0], sfoCenter[1], true);
+          if (!startMarker) {
+            startMarker = L.marker([origin.lat, origin.lng], { draggable: true }).addTo(layerPath);
+            startMarker.bindPopup('Start (origin)').openPopup();
+          }
+        }
+        trajectory = { x:0, y:0, pathXY:[{x:0,y:0}], pathLL:[{lat: origin.lat, lng: origin.lng}] };
+        pathPolyline.setLatLngs([[origin.lat, origin.lng]]);
+        currentMarker.setLatLng([origin.lat, origin.lng]);
+        steps = 0;
+
+        const side = 15;
+        const headingSeq = [90, 0, 270, 180];
+        for (let seg=0; seg<4; seg++) {
+          headingFused = deg2rad(headingSeq[seg]);
+          for (let i=0;i<Math.floor(side/0.75); i++) {
+            stepLen = 0.75;
+            steps++;
+            applyStepUpdate();
+            await new Promise(r => setTimeout(r, 20));
+          }
+        }
+        log('Sim done: final x=' + trajectory.x.toFixed(2) + ' y=' + trajectory.y.toFixed(2));
+        setMessage('Simulation complete. (This is a logic test, not sensor validation.)', 'success');
+      }
+
+      // ----------------------------
+      // Actions
+      // ----------------------------
+      async function useGPSStart() {
+        if (!navigator.geolocation) {
+          setMessage('Geolocation not supported.', 'error');
+          return;
+        }
+        setMessage('Requesting GPS… (may be inaccurate indoors)', '');
+        navigator.geolocation.getCurrentPosition((pos) => {
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          if (!startMarker) {
+            startMarker = L.marker([lat, lng], { draggable: true }).addTo(layerPath);
+            startMarker.bindPopup('Start (origin)').openPopup();
+            startMarker.on('dragend', () => {
+              const ll = startMarker.getLatLng();
+              setOrigin(ll.lat, ll.lng, true);
+            });
+          }
+          setOrigin(lat, lng, true);
+          map.setView([lat, lng], 18);
+          setMessage('GPS start set. Now set heading and walk.', 'success');
+        }, (err) => {
+          setMessage('GPS error: ' + err.message, 'error');
+        }, {
+          enableHighAccuracy: true,
+          timeout: 8000,
+          maximumAge: 0
+        });
+      }
+
+      function clearMap() {
+        layerWalkways.clearLayers();
+        layerPOI.clearLayers();
+        OSM.walkways = [];
+        OSM.poi = [];
+        selectPOI.innerHTML = '<option value="">(Load POIs first)</option>';
+        setMessage('Cleared OSM overlays.', '');
+        log('Map cleared');
+      }
+
+      function toggleSnap() {
+        snappingEnabled = !snappingEnabled;
+        setMessage('Snapping ' + (snappingEnabled ? 'enabled' : 'disabled') + '.', '');
+        updatePills();
+      }
+
+      function setHeadingNow() {
+        headingOffsetDeg = parseFloat(inputHeadingOffset.value || '0') || 0;
+        if (headingMagDeg != null) {
+          headingGyro = deg2rad(wrapDeg(headingMagDeg + headingOffsetDeg));
+          headingFused = headingGyro;
+          setMessage('Heading set from compass.', 'success');
+        } else {
+          setMessage('No reliable compass available. Use snapping + landmark anchors to constrain heading.', 'warn');
+        }
+        log('Set heading now. mag=' + (headingMagDeg==null?'null':headingMagDeg.toFixed(0)));
+      }
+
+      function anchorSelectedPOI() {
+        const idStr = selectPOI.value;
+        if (!idStr) { setMessage('Select a POI first.', 'warn'); return; }
+        const id = parseInt(idStr, 10);
+        const p = OSM.poi.find(x => x.id === id);
+        if (!p) { setMessage('POI not found. Reload POIs.', 'warn'); return; }
+        anchorTo(p.latlng, 'POI');
+        map.panTo([p.latlng.lat, p.latlng.lng]);
+      }
+
+      function anchorToClickedPoint() {
+        if (!lastMapClickLatLng) { setMessage('Click on the map first.', 'warn'); return; }
+        anchorTo({ lat: lastMapClickLatLng.lat, lng: lastMapClickLatLng.lng }, 'map click');
+      }
+
+      // ----------------------------
+      // Wire up events
+      // ----------------------------
+      btnStart.addEventListener('click', startRecording);
+      btnStop.addEventListener('click', stopRecording);
+      btnDownload.addEventListener('click', downloadData);
+      btnResetAll.addEventListener('click', resetAll);
+
+      btnLoadOSM.addEventListener('click', loadWalkways);
+      btnLoadPOI.addEventListener('click', loadPOI);
+      btnUseGPS.addEventListener('click', useGPSStart);
+      btnClearMap.addEventListener('click', clearMap);
+
+      btnToggleSnap.addEventListener('click', toggleSnap);
+      btnSetHeading.addEventListener('click', setHeadingNow);
+
+      btnAnchorPOI.addEventListener('click', anchorSelectedPOI);
+      btnAnchorMapClick.addEventListener('click', anchorToClickedPoint);
+
+      btnEval.addEventListener('click', runEval);
+
+      btnSim.addEventListener('click', simulateSteps);
+      btnExportGraph.addEventListener('click', exportWalkwaysGeoJSON);
+
+      window.addEventListener('resize', () => drawTrajectoryMini());
+      drawTrajectoryMini();
+      updatePills();
+
+      if (!window.DeviceMotionEvent) {
+        setMessage('Device motion is not supported on this device/browser.', 'error');
+        btnStart.disabled = true;
+      }
+    })();
+  </script>
+</body>
+</html>

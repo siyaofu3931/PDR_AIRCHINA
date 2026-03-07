@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>PDR Log Replay Player – SFO (v1)</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    :root{
+      --bg:#0b1020;
+      --card:#121a33;
+      --muted:#9bb0ff;
+      --text:#e9eeff;
+      --good:#66ff99;
+      --warn:#ffd166;
+      --bad:#ff6b6b;
+      --line:#2a3568;
+    }
+    *{ box-sizing:border-box; }
+    body{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", Arial; background:var(--bg); color:var(--text); }
+    .wrap{ display:flex; height:100vh; }
+    #map{ flex: 1 1 auto; min-width: 50vw; }
+    .side{ width: 420px; max-width: 100vw; padding: 12px; overflow:auto; border-left:1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(18,26,51,0.98), rgba(11,16,32,0.98)); }
+    .card{ background: rgba(18,26,51,0.88); border:1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 12px; margin-bottom: 10px; }
+    h1{ font-size: 16px; margin: 0 0 10px; }
+    h2{ font-size: 13px; margin: 0 0 8px; color: var(--muted); }
+    .row{ display:flex; justify-content:space-between; gap:10px; padding: 6px 0; border-bottom:1px solid rgba(255,255,255,0.06); }
+    .row:last-child{ border-bottom:none; }
+    .k{ color: rgba(233,238,255,0.86); font-size: 12px;}
+    .v{ color: rgba(233,238,255,1); font-variant-numeric: tabular-nums; font-size: 12px; text-align:right;}
+    .btns{ display:flex; flex-wrap:wrap; gap:8px; }
+    button{
+      background: rgba(155,176,255,0.14);
+      color: var(--text);
+      border:1px solid rgba(155,176,255,0.28);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      cursor:pointer;
+    }
+    button:hover{ background: rgba(155,176,255,0.22); }
+    button:disabled{ opacity:0.5; cursor:not-allowed; }
+    .pill{
+      display:inline-flex; align-items:center; gap:6px;
+      padding: 4px 8px; border-radius: 999px;
+      border:1px solid rgba(255,255,255,0.12);
+      font-size: 11px; color: rgba(233,238,255,0.9);
+    }
+    .pill.good{ border-color: rgba(102,255,153,0.35); color: var(--good); }
+    .pill.warn{ border-color: rgba(255,209,102,0.35); color: var(--warn); }
+    .pill.bad{ border-color: rgba(255,107,107,0.35); color: var(--bad); }
+
+    input[type="range"]{ width:100%; }
+    input[type="number"]{ width: 110px; background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); color: var(--text); border-radius: 10px; padding: 6px 8px; }
+    input[type="file"]{ width:100%; }
+
+    .two{ display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    canvas{ width:100%; height:110px; background: rgba(0,0,0,0.22); border:1px solid rgba(255,255,255,0.08); border-radius: 12px; }
+
+    .msg{ font-size: 12px; color: rgba(233,238,255,0.86); line-height:1.4; }
+    .msg .err{ color: var(--bad); }
+    .msg .ok{ color: var(--good); }
+
+    @media (max-width: 980px){
+      .wrap{ flex-direction: column; }
+      #map{ min-width: 100vw; height: 56vh; }
+      .side{ width: 100vw; height: 44vh; border-left:none; border-top:1px solid rgba(255,255,255,0.08); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div id="map"></div>
+
+    <div class="side">
+      <div class="card">
+        <h1>PDR Log Replay Player – SFO (v1)</h1>
+        <div class="msg" id="msg">加载一份 v2.1 导出的 JSON，然后回放每一步（显示 snap residual / magTrust / heading 等）。</div>
+      </div>
+
+      <div class="card">
+        <h2>1) 载入 Log</h2>
+        <input id="fileInput" type="file" accept=".json,application/json" />
+        <div style="height:8px"></div>
+        <div class="btns">
+          <button id="btnLoadWalkways">Load SFO walkways (Overpass)</button>
+          <button id="btnFit">Fit to track</button>
+          <button id="btnClear">Clear</button>
+        </div>
+        <div style="height:8px"></div>
+        <div class="two">
+          <div class="pill" id="pillSteps">Steps: —</div>
+          <div class="pill" id="pillSamples">Samples: —</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2) 回放控制</h2>
+        <div class="row"><div class="k">Step index</div><div class="v"><span id="curStep">—</span> / <span id="maxStep">—</span></div></div>
+        <input id="stepSlider" type="range" min="0" max="0" value="0" />
+        <div style="height:10px"></div>
+        <div class="btns">
+          <button id="btnPrev">◀ Prev</button>
+          <button id="btnPlay">▶ Play</button>
+          <button id="btnNext">Next ▶</button>
+          <button id="btnNextSpike">Next spike</button>
+        </div>
+        <div style="height:10px"></div>
+        <div class="row" style="align-items:center;">
+          <div class="k">Speed (steps/s)</div>
+          <div class="v"><input id="speedInput" type="number" min="1" max="10" step="1" value="2" /></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>3) 当前步信息（用于调参定位问题）</h2>
+        <div class="row"><div class="k">Residual (m)</div><div class="v" id="vResidual">—</div></div>
+        <div class="row"><div class="k">magTrust</div><div class="v" id="vTrust">—</div></div>
+        <div class="row"><div class="k">Heading fused / seg</div><div class="v" id="vHeading">—</div></div>
+        <div class="row"><div class="k">StepLen / Cadence</div><div class="v" id="vStepLen">—</div></div>
+        <div class="row"><div class="k">Pose / State</div><div class="v" id="vState">—</div></div>
+        <div class="row"><div class="k">Time</div><div class="v" id="vTime">—</div></div>
+      </div>
+
+      <div class="card">
+        <h2>4) 时间序列（Residual & magTrust）</h2>
+        <div class="two">
+          <div>
+            <div class="k" style="margin:0 0 6px;">Snap residual (m)</div>
+            <canvas id="cResidual" width="600" height="220"></canvas>
+          </div>
+          <div>
+            <div class="k" style="margin:0 0 6px;">magTrust (0..1)</div>
+            <canvas id="cTrust" width="600" height="220"></canvas>
+          </div>
+        </div>
+        <div style="height:8px"></div>
+        <div class="msg">提示：Residual 连续尖峰通常意味着“吸附跳变/错路”；magTrust 长期很低说明指南针不可靠，应更依赖路网约束与锚点。</div>
+      </div>
+
+      <div class="card">
+        <h2>5) 操作建议（实地两圈快速定位问题）</h2>
+        <div class="msg">
+          <ol style="margin:0; padding-left: 16px;">
+            <li>同一路线走两次：一次当 baseline，一次当 test（中途少做交互更能暴露问题）。</li>
+            <li>打开本回放器，先看 Residual 曲线：尖峰出现的位置通常就是你要调“吸附/航向”的点。</li>
+            <li>再看 magTrust：如果一直很低，说明磁干扰大，建议降低磁融合权重，靠走廊约束 + 锚点。</li>
+            <li>最后看 StepLen/Cadence：如果步长漂移大，优先做两次 anchor（A→B）让 K 收敛。</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  // -----------------------------
+  // Small utils
+  // -----------------------------
+  const clamp = (x,a,b)=>Math.max(a,Math.min(b,x));
+  const fmt = (x, n=2)=> (x==null || Number.isNaN(x)) ? "—" : (+x).toFixed(n);
+  const wrapDeg = (d)=>{ d%=360; if(d<0)d+=360; return d; };
+  const deg2rad = (d)=>d*Math.PI/180;
+  const rad2deg = (r)=>r*180/Math.PI;
+
+  function setMsg(text, kind=""){
+    const el = document.getElementById("msg");
+    if(kind==="err") el.innerHTML = `<span class="err">${text}</span>`;
+    else if(kind==="ok") el.innerHTML = `<span class="ok">${text}</span>`;
+    else el.textContent = text;
+  }
+
+  // -----------------------------
+  // Leaflet map init
+  // -----------------------------
+  const map = L.map('map', { zoomControl: true }).setView([37.615, -122.39], 16);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 20, attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const layerWalk = L.layerGroup().addTo(map);
+  const layerTrack = L.layerGroup().addTo(map);
+  const layerMarkers = L.layerGroup().addTo(map);
+
+  let polyAll=null, polyWalked=null, marker=null;
+  let data=null, stepRecs=[], residuals=[], trusts=[], stepLL=[];
+
+  // -----------------------------
+  // UI refs
+  // -----------------------------
+  const fileInput = document.getElementById("fileInput");
+  const btnLoadWalkways = document.getElementById("btnLoadWalkways");
+  const btnFit = document.getElementById("btnFit");
+  const btnClear = document.getElementById("btnClear");
+
+  const stepSlider = document.getElementById("stepSlider");
+  const curStepEl = document.getElementById("curStep");
+  const maxStepEl = document.getElementById("maxStep");
+  const btnPrev = document.getElementById("btnPrev");
+  const btnPlay = document.getElementById("btnPlay");
+  const btnNext = document.getElementById("btnNext");
+  const btnNextSpike = document.getElementById("btnNextSpike");
+  const speedInput = document.getElementById("speedInput");
+
+  const pillSteps = document.getElementById("pillSteps");
+  const pillSamples = document.getElementById("pillSamples");
+
+  const vResidual = document.getElementById("vResidual");
+  const vTrust = document.getElementById("vTrust");
+  const vHeading = document.getElementById("vHeading");
+  const vStepLen = document.getElementById("vStepLen");
+  const vState = document.getElementById("vState");
+  const vTime = document.getElementById("vTime");
+
+  const cResidual = document.getElementById("cResidual");
+  const cTrust = document.getElementById("cTrust");
+
+  let playing=false, playTimer=null;
+
+  // -----------------------------
+  // Walkways via Overpass (optional)
+  // -----------------------------
+  async function fetchOverpass(query){
+    const url = 'https://overpass-api.de/api/interpreter';
+    const res = await fetch(url, { method:'POST', body: query, headers:{ 'Content-Type':'text/plain;charset=UTF-8' }});
+    if(!res.ok) throw new Error('Overpass error: '+res.status);
+    return await res.json();
+  }
+
+  function parseOverpassWays(json){
+    const nodes = new Map();
+    for(const el of json.elements){
+      if(el.type==='node') nodes.set(el.id, [el.lat, el.lon]);
+    }
+    const ways = [];
+    for(const el of json.elements){
+      if(el.type==='way' && Array.isArray(el.nodes)){
+        const pts = el.nodes.map(id => nodes.get(id)).filter(Boolean);
+        if(pts.length>=2) ways.push({ id: el.id, pts, tags: el.tags||{} });
+      }
+    }
+    return ways;
+  }
+
+  function drawWalkways(ways){
+    layerWalk.clearLayers();
+    for(const w of ways){
+      L.polyline(w.pts, {
+        weight: 2,
+        opacity: 0.65,
+        color: '#7aa2ff'
+      }).addTo(layerWalk);
+    }
+  }
+
+  async function loadSfoWalkways(){
+    setMsg("正在从 Overpass 拉取 SFO walkways…");
+    // bbox around SFO terminals
+    const bbox = '37.605,-122.402,37.626,-122.375'; // south,west,north,east
+    const q = `
+[out:json][timeout:25];
+(
+  way["highway"~"corridor|footway|path|pedestrian|steps"](${bbox});
+  way["indoor"="corridor"](${bbox});
+);
+(._;>;);
+out body;
+`;
+    const json = await fetchOverpass(q);
+    const ways = parseOverpassWays(json);
+    drawWalkways(ways);
+    setMsg(`Walkways loaded: ${ways.length} ways`, "ok");
+  }
+
+  // -----------------------------
+  // Build step records (per step)
+  // -----------------------------
+  function buildStepRecords(samples, stepCountHint){
+    let maxSteps = stepCountHint || 0;
+    for(const s of samples){
+      if(typeof s.steps === 'number' && s.steps > maxSteps) maxSteps = s.steps;
+    }
+    const firstOfStep = new Array(maxSteps+1).fill(null);
+    for(const s of samples){
+      const k = s.steps;
+      if(typeof k !== 'number') continue;
+      if(k<=0 || k>maxSteps) continue;
+      if(firstOfStep[k] == null) firstOfStep[k] = s;
+    }
+    // fill missing by carrying forward (keeps continuity)
+    for(let k=1;k<=maxSteps;k++){
+      if(firstOfStep[k]==null) firstOfStep[k]=firstOfStep[k-1];
+    }
+    return firstOfStep.slice(1); // 1..N
+  }
+
+  function getLatLngFromStepRec(r){
+    if(!r) return null;
+    const p = r.position || {};
+    if(typeof p.lat === 'number' && typeof p.lng === 'number') return [p.lat, p.lng];
+    return null;
+  }
+
+  // -----------------------------
+  // Draw / update track
+  // -----------------------------
+  function clearAll(){
+    layerTrack.clearLayers();
+    layerMarkers.clearLayers();
+    polyAll=null; polyWalked=null; marker=null;
+    data=null; stepRecs=[]; residuals=[]; trusts=[]; stepLL=[];
+    stepSlider.min=0; stepSlider.max=0; stepSlider.value=0;
+    curStepEl.textContent="—"; maxStepEl.textContent="—";
+    pillSteps.className="pill"; pillSteps.textContent="Steps: —";
+    pillSamples.className="pill"; pillSamples.textContent="Samples: —";
+    drawCharts();
+    setMsg("已清空。");
+  }
+
+  function ensureTrackLayers(){
+    if(polyAll) return;
+    polyAll = L.polyline([], { weight: 4, opacity: 0.25, color:'#66ff99' }).addTo(layerTrack);
+    polyWalked = L.polyline([], { weight: 5, opacity: 0.85, color:'#66ff99' }).addTo(layerTrack);
+    marker = L.circleMarker([37.615, -122.39], { radius: 7, weight: 2, color:'#9bb0ff', fillColor:'#9bb0ff', fillOpacity: 0.9 }).addTo(layerMarkers);
+  }
+
+  function fitToTrack(){
+    if(!stepLL.length) return;
+    const bounds = L.latLngBounds(stepLL);
+    map.fitBounds(bounds.pad(0.15));
+  }
+
+  function updateInfo(i){
+    const r = stepRecs[i];
+    if(!r){
+      vResidual.textContent="—";
+      vTrust.textContent="—";
+      vHeading.textContent="—";
+      vStepLen.textContent="—";
+      vState.textContent="—";
+      vTime.textContent="—";
+      return;
+    }
+    const res = r.snap?.residualM;
+    const trust = r.heading?.magTrust;
+    const hf = r.heading?.fusedDeg;
+    const seg = r.snap?.segBearingDeg;
+
+    vResidual.textContent = `${fmt(res,2)} m`;
+    vTrust.textContent = fmt(trust,2);
+
+    const dSeg = (hf!=null && seg!=null) ? Math.abs(((wrapDeg(seg)-wrapDeg(hf)+540)%360)-180) : null;
+    vHeading.textContent = `fused ${fmt(hf,1)}° / seg ${fmt(seg,1)}°` + (dSeg!=null ? ` (Δ${fmt(dSeg,1)}°)` : "");
+
+    vStepLen.textContent = `${fmt(r.stepLenM,2)} m / ${fmt(r.cadenceHz,2)} Hz`;
+    vState.textContent = `${r.pose ?? "—"} / ${r.state?.label ?? r.state ?? "—"}`;
+    vTime.textContent = `${r.ts ?? "—"}`;
+  }
+
+  function setStepIndex(i){
+    if(!stepRecs.length) return;
+    i = clamp(i, 0, stepRecs.length-1);
+    stepSlider.value = String(i);
+    curStepEl.textContent = String(i+1);
+    maxStepEl.textContent = String(stepRecs.length);
+
+    ensureTrackLayers();
+
+    // Update walked polyline and marker
+    const ll = stepLL[i];
+    if(ll){
+      marker.setLatLng(ll);
+    }
+    const walked = stepLL.slice(0, i+1);
+    polyAll.setLatLngs(stepLL);
+    polyWalked.setLatLngs(walked);
+
+    updateInfo(i);
+    drawCharts(i);
+  }
+
+  // -----------------------------
+  // Charts
+  // -----------------------------
+  function drawChart(canvas, values, yMin, yMax, curIdx, label){
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0,0,W,H);
+
+    // grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for(let g=1; g<4; g++){
+      const y = (H*g)/4;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+    }
+
+    if(!values || values.length===0){
+      ctx.fillStyle = 'rgba(233,238,255,0.6)';
+      ctx.font = '14px system-ui';
+      ctx.fillText('No data', 14, 26);
+      return;
+    }
+
+    // line
+    ctx.strokeStyle = 'rgba(102,255,153,0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for(let i=0;i<values.length;i++){
+      const v = values[i];
+      const x = (i/(values.length-1))*(W-2) + 1;
+      const vv = clamp(v, yMin, yMax);
+      const y = H - ((vv - yMin)/(yMax-yMin))*(H-2) - 1;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+
+    // current cursor
+    if(curIdx != null){
+      const x = (curIdx/(values.length-1))*(W-2)+1;
+      ctx.strokeStyle = 'rgba(255,209,102,0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+    }
+
+    // label
+    ctx.fillStyle = 'rgba(233,238,255,0.8)';
+    ctx.font = '12px system-ui';
+    ctx.fillText(label, 10, H-10);
+
+    // min/max
+    const vmax = Math.max(...values.filter(v=>Number.isFinite(v)));
+    const vmin = Math.min(...values.filter(v=>Number.isFinite(v)));
+    ctx.fillStyle = 'rgba(233,238,255,0.75)';
+    ctx.fillText(`min ${vmin.toFixed(2)}  max ${vmax.toFixed(2)}`, 10, 18);
+  }
+
+  function drawCharts(curIdx=null){
+    const rMax = Math.max(3, Math.min(12, Math.max(...(residuals.filter(v=>Number.isFinite(v))) , 3)));
+    drawChart(cResidual, residuals.map(v=>Number.isFinite(v)?v:0), 0, rMax, curIdx, 'residual (m)');
+    drawChart(cTrust, trusts.map(v=>Number.isFinite(v)?v:0), 0, 1, curIdx, 'magTrust');
+  }
+
+  // -----------------------------
+  // Playback
+  // -----------------------------
+  function setPlaying(on){
+    playing = on;
+    btnPlay.textContent = playing ? "⏸ Pause" : "▶ Play";
+    if(playing){
+      const sps = clamp(parseInt(speedInput.value||"2",10), 1, 10);
+      playTimer = setInterval(()=>{
+        const i = parseInt(stepSlider.value||"0",10);
+        if(i >= stepRecs.length-1){
+          setPlaying(false);
+          return;
+        }
+        setStepIndex(i+1);
+      }, Math.round(1000 / sps));
+    }else{
+      if(playTimer) clearInterval(playTimer);
+      playTimer=null;
+    }
+  }
+
+  function nextSpike(){
+    if(!residuals.length) return;
+    const cur = parseInt(stepSlider.value||"0",10);
+    // spike heuristic: residual > 0.9*badSnapM (10m default) OR top quartile
+    const sorted = residuals.filter(Number.isFinite).slice().sort((a,b)=>a-b);
+    const q75 = sorted.length ? sorted[Math.floor(sorted.length*0.75)] : 6;
+    const thr = Math.max(8.5, q75); // conservative
+    for(let i=cur+1;i<residuals.length;i++){
+      if(residuals[i] >= thr){
+        setStepIndex(i);
+        setMsg(`跳到 residual spike: step ${i+1}, residual=${residuals[i].toFixed(2)}m`, "ok");
+        return;
+      }
+    }
+    setMsg("没有找到更靠后的 spike。");
+  }
+
+  // -----------------------------
+  // Load JSON
+  // -----------------------------
+  fileInput.addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0];
+    if(!f) return;
+    try{
+      const txt = await f.text();
+      data = JSON.parse(txt);
+      if(!data || !data.samples){
+        setMsg("JSON 格式不对：缺少 samples[]", "err");
+        return;
+      }
+      const meta = data.meta || {};
+      const samples = data.samples || [];
+      const stepCount = meta.stepCount || 0;
+
+      stepRecs = buildStepRecords(samples, stepCount);
+
+      // step lat/lng: prefer per-step record; fallback to trajectory.pathLL if exists
+      stepLL = [];
+      for(const r of stepRecs){
+        const ll = getLatLngFromStepRec(r);
+        if(ll) stepLL.push(ll);
+      }
+      if(stepLL.length !== stepRecs.length){
+        const pathLL = data.trajectory?.pathLL;
+        if(Array.isArray(pathLL) && pathLL.length >= stepRecs.length){
+          stepLL = pathLL.slice(0, stepRecs.length).map(p=>[p.lat, p.lng]).filter(a=>a[0]!=null && a[1]!=null);
+        }
+      }
+
+      residuals = stepRecs.map(r => r?.snap?.residualM ?? NaN);
+      trusts = stepRecs.map(r => r?.heading?.magTrust ?? NaN);
+
+      pillSteps.textContent = `Steps: ${stepRecs.length}`;
+      pillSamples.textContent = `Samples: ${samples.length}`;
+      pillSteps.className = "pill good";
+      pillSamples.className = "pill good";
+
+      stepSlider.min = 0;
+      stepSlider.max = Math.max(0, stepRecs.length-1);
+      stepSlider.value = 0;
+
+      ensureTrackLayers();
+      polyAll.setLatLngs(stepLL);
+      polyWalked.setLatLngs(stepLL.slice(0,1));
+      if(stepLL[0]) marker.setLatLng(stepLL[0]);
+
+      drawCharts(0);
+      setStepIndex(0);
+      fitToTrack();
+
+      setMsg(`已加载：steps=${stepRecs.length}, samples=${samples.length}. 现在可以回放并观察 residual/magTrust。`, "ok");
+    }catch(err){
+      console.error(err);
+      setMsg("加载失败：" + (err?.message || String(err)), "err");
+    }
+  });
+
+  stepSlider.addEventListener('input', ()=>{
+    const i = parseInt(stepSlider.value||"0",10);
+    setStepIndex(i);
+  });
+
+  btnPrev.addEventListener('click', ()=> setStepIndex(parseInt(stepSlider.value||"0",10)-1));
+  btnNext.addEventListener('click', ()=> setStepIndex(parseInt(stepSlider.value||"0",10)+1));
+  btnPlay.addEventListener('click', ()=> setPlaying(!playing));
+  btnNextSpike.addEventListener('click', ()=> nextSpike());
+
+  btnLoadWalkways.addEventListener('click', async ()=>{
+    try{ await loadSfoWalkways(); }
+    catch(err){ console.error(err); setMsg("加载 walkways 失败：" + (err?.message || String(err)), "err"); }
+  });
+
+  btnFit.addEventListener('click', ()=> fitToTrack());
+  btnClear.addEventListener('click', ()=> { setPlaying(false); clearAll(); layerWalk.clearLayers(); });
+
+  // keyboard shortcuts (desktop)
+  window.addEventListener('keydown', (e)=>{
+    if(e.key === ' '){ e.preventDefault(); setPlaying(!playing); }
+    if(e.key === 'ArrowLeft') setStepIndex(parseInt(stepSlider.value||"0",10)-1);
+    if(e.key === 'ArrowRight') setStepIndex(parseInt(stepSlider.value||"0",10)+1);
+  });
+
+})();
+</script>
+</body>
+</html>
