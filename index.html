@@ -282,8 +282,6 @@
       // Weinberg: step_length = K_weinberg * (a_max - a_min)^0.25
       let K_weinberg = 0.5;
       let stepHistory = [];
-      let stepCycleAmax = 0;
-      let stepCycleAmin = 1e9;
       let totalDistanceM = 0;
 
       // Heading fusion: gyro integration + magnetometer complementary + drift correction
@@ -302,22 +300,30 @@
       const DRIFT_THRESHOLD_DEG = 35;
       const DRIFT_WARN_SAMPLES = 40;
 
-      // Step detection: magnitude + peak/valley + min period; adaptive threshold from last N peaks
+      // --- Step detection config ---
+      // Band-pass keeps 0.5–3 Hz (walking); adaptive threshold and valley/prominence reduce false steps from shake.
       const stepConfig = {
-        minPeriodMs: 500,
-        peakMinRatio: 0.03,
-        smoothing: 0.92,
-        baselineAlpha: 0.998,
-        valleyRatio: 0.015,
-        adaptivePeakWindow: 8
+        minPeriodMs: 350,           // Minimum time between two consecutive steps (ms); rejects very fast double peaks.
+        adaptiveWindowMs: 2000,     // Window length for computing mean μ and std σ of the filtered signal.
+        adaptiveK: 0.5,             // Threshold = μ + k*σ; higher k = stricter (fewer false steps, may miss weak steps).
+        bandpassLowHz: 0.5,         // High-pass cutoff (Hz); removes drift and DC.
+        bandpassHighHz: 3,          // Low-pass cutoff (Hz); removes high-frequency noise.
+        defaultThreshold: 0.5,      // Threshold used until we have enough samples in the window.
+        minSamplesForThreshold: 20,  // Minimum samples in window before using adaptive threshold instead of default.
+        minProminence: 0.35,        // Minimum (peak − valley) in m/s² to count a step; filters small shake oscillations.
+        valleyBelowMu: true        // If true, require signal to drop below mean before next step (anti-shake).
       };
-      let smoothedMagnitude = 0;
-      let magnitudeBaseline = 0;
-      let lastMagnitude = 0;
-      let rising = false;
-      let lastStepTime = 0;
-      let hadValleySinceLastStep = false;
-      let recentPeakHeights = [];
+      // Step detection state (reset on Reset / Start)
+      let lastStepTime = 0;              // Timestamp of last accepted step (for min period check).
+      let lastStepDetectTime = null;      // Timestamp of previous sample (for dt in band-pass).
+      let bpHpPrev = 0;                  // Previous high-pass output.
+      let bpLpPrev = 0;                  // Previous low-pass output.
+      let lastMagRaw = null;              // Previous raw magnitude (for high-pass delta).
+      let magBuffer = [];                 // Rolling { t, v } of band-pass output for adaptive threshold (2 s).
+      let magPrev2 = null;                // Band-pass value at sample i-2 (for local max: need v[i-2] < v[i-1] > v[i]).
+      let magPrev1 = null;                // Band-pass value at sample i-1.
+      let minSinceLastStep = Infinity;    // Minimum band-pass value since last step (valley for prominence).
+      let hadValleySinceLastStep = true;  // True after signal drops below mean; false right after a step (anti-shake).
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -329,45 +335,90 @@
         messageEl.className = 'message' + (type ? ' ' + type : '');
       }
 
-      function stepDetect(accG) {
-        if (!accG || accG.x == null) return;
-        const mag = Math.sqrt(accG.x * accG.x + accG.y * accG.y + accG.z * accG.z);
-        if (magnitudeBaseline === 0) magnitudeBaseline = mag;
-        smoothedMagnitude = stepConfig.smoothing * smoothedMagnitude + (1 - stepConfig.smoothing) * mag;
-        magnitudeBaseline = stepConfig.baselineAlpha * magnitudeBaseline + (1 - stepConfig.baselineAlpha) * smoothedMagnitude;
-        stepCycleAmax = Math.max(stepCycleAmax, smoothedMagnitude);
-        stepCycleAmin = Math.min(stepCycleAmin, smoothedMagnitude);
-        const now = Date.now();
-        const aboveBaseline = smoothedMagnitude - magnitudeBaseline;
-        let minPeakHeight = magnitudeBaseline * stepConfig.peakMinRatio;
-        if (recentPeakHeights.length > 0) {
-          const mean = recentPeakHeights.reduce(function (a, b) { return a + b; }, 0) / recentPeakHeights.length;
-          const adaptive = Math.max(mean * 0.4, magnitudeBaseline * stepConfig.peakMinRatio);
-          minPeakHeight = Math.max(minPeakHeight, Math.min(adaptive, magnitudeBaseline * 0.08));
+      /**
+       * Step detection from linear acceleration (gravity already removed).
+       * Pipeline: orientation-invariant magnitude → band-pass (0.5–3 Hz) → adaptive threshold T=μ+kσ →
+       * peak detection (local max + prominence + valley-between-steps) → Weinberg step length.
+       * @param {Object} acc - { x, y, z } linear acceleration in m/s² (e.g. from DeviceMotionEvent.acceleration or accG − gravity).
+       * @param {number} [timeMs] - Timestamp in ms (e.g. Date.now()); used for dt and 2s window.
+       */
+      function stepDetect(acc, timeMs) {
+        if (!acc || acc.x == null) return;
+        const now = timeMs != null ? timeMs : Date.now();
+
+        // 1) Orientation-invariant magnitude (same in pocket, hand, or tilted)
+        const mag = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+
+        // 2) Time step for filter (cap to avoid big gaps)
+        const dtSec = lastStepDetectTime != null
+          ? Math.min((now - lastStepDetectTime) / 1000, 0.1)
+          : 0.02;
+        lastStepDetectTime = now;
+
+        // 3) Band-pass: high-pass at bandpassLowHz, then low-pass at bandpassHighHz (one-pole IIR)
+        const tauHp = 1 / (2 * Math.PI * stepConfig.bandpassLowHz);
+        const tauLp = 1 / (2 * Math.PI * stepConfig.bandpassHighHz);
+        const alphaHp = tauHp / (tauHp + dtSec);
+        const alphaLp = Math.exp(-dtSec / tauLp);
+        const lastRaw = lastMagRaw != null ? lastMagRaw : mag;
+        const hpOut = alphaHp * (bpHpPrev + mag - lastRaw);
+        const lpOut = alphaLp * bpLpPrev + (1 - alphaLp) * hpOut;
+        bpHpPrev = hpOut;
+        bpLpPrev = lpOut;
+        lastMagRaw = mag;
+
+        // 4) Rolling buffer for adaptive threshold (drop older than adaptiveWindowMs)
+        magBuffer.push({ t: now, v: lpOut });
+        const cutoff = now - stepConfig.adaptiveWindowMs;
+        while (magBuffer.length > 0 && magBuffer[0].t < cutoff) magBuffer.shift();
+
+        minSinceLastStep = Math.min(minSinceLastStep, lpOut);
+
+        // 5) Adaptive threshold T = μ + k*σ (over last 2 s); floor 0.15 so weak signals can still trigger
+        let threshold = stepConfig.defaultThreshold;
+        let mu = 0;
+        if (magBuffer.length >= stepConfig.minSamplesForThreshold) {
+          const vals = magBuffer.map(function (e) { return e.v; });
+          mu = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+          const variance = vals.reduce(function (s, v) { return s + (v - mu) * (v - mu); }, 0) / vals.length;
+          const sigma = Math.sqrt(Math.max(0, variance));
+          threshold = Math.max(mu + stepConfig.adaptiveK * sigma, 0.15);
         }
-        const valleyThreshold = magnitudeBaseline * (1 - stepConfig.valleyRatio);
-        if (smoothedMagnitude < valleyThreshold) hadValleySinceLastStep = true;
-        const peakValueAboveBaseline = lastMagnitude - magnitudeBaseline;
-        const isPeak = rising && lastMagnitude > smoothedMagnitude
-          && aboveBaseline > minPeakHeight
-          && peakValueAboveBaseline > minPeakHeight;
-        if (isPeak && hadValleySinceLastStep && now - lastStepTime >= stepConfig.minPeriodMs) {
-          const delta = Math.max(stepCycleAmax - stepCycleAmin, 0.1);
-          const rawWeinberg = Math.pow(delta, 0.25);
-          let stepLengthM = K_weinberg * rawWeinberg;
-          stepLengthM = Math.max(0.2, Math.min(1.2, stepLengthM));
-          stepHistory.push({ stepIndex: stepCount + 1, a_max: stepCycleAmax, a_min: stepCycleAmin, stepLengthM, ts: now });
-          totalDistanceM += stepLengthM;
-          if (recentPeakHeights.length >= stepConfig.adaptivePeakWindow) recentPeakHeights.shift();
-          recentPeakHeights.push(peakValueAboveBaseline);
-          stepCount++;
-          lastStepTime = now;
-          hadValleySinceLastStep = false;
-          stepCycleAmax = smoothedMagnitude;
-          stepCycleAmin = smoothedMagnitude;
+        // Mark that we've seen a valley (signal below mean) so next peak can count as step (anti-shake)
+        if (stepConfig.valleyBelowMu && magBuffer.length >= stepConfig.minSamplesForThreshold && lpOut < mu) {
+          hadValleySinceLastStep = true;
         }
-        rising = smoothedMagnitude > lastMagnitude;
-        lastMagnitude = smoothedMagnitude;
+
+        // 6) Peak check: previous sample (magPrev1) is a local maximum and passes all guards
+        if (magPrev2 != null) {
+          const isLocalMax = magPrev2 < magPrev1 && magPrev1 > lpOut;
+          const aboveThreshold = magPrev1 > threshold;
+          const minPeriodOk = (now - lastStepTime) >= stepConfig.minPeriodMs;
+          const a_max = magPrev1;
+          const a_min = minSinceLastStep;
+          const prominence = a_max - a_min;
+          const minProminenceOk = prominence >= stepConfig.minProminence;
+
+          if (isLocalMax && aboveThreshold && minPeriodOk && minProminenceOk && hadValleySinceLastStep) {
+            const stepLengthM = K_weinberg * Math.pow(Math.max(0.01, prominence), 0.25);
+            stepHistory.push({
+              stepIndex: stepCount + 1,
+              a_max: a_max,
+              a_min: a_min,
+              stepLengthM: stepLengthM,
+              ts: now
+            });
+            totalDistanceM += stepLengthM;
+            stepCount++;
+            lastStepTime = now;
+            minSinceLastStep = Infinity;
+            hadValleySinceLastStep = false;
+          }
+        }
+
+        // 7) Shift history for next sample (must be after peak check so magPrev1 is still previous value)
+        magPrev2 = magPrev1;
+        magPrev1 = lpOut;
       }
 
       function updateTrajectory() {
@@ -472,15 +523,16 @@
         recordBuffer = [];
         stepHistory = [];
         totalDistanceM = 0;
-        stepCycleAmax = 0;
-        stepCycleAmin = 1e9;
-        recentPeakHeights = [];
-        smoothedMagnitude = 0;
-        magnitudeBaseline = 0;
-        lastMagnitude = 0;
-        rising = false;
         lastStepTime = 0;
-        hadValleySinceLastStep = false;
+        lastStepDetectTime = null;
+        bpHpPrev = 0;
+        bpLpPrev = 0;
+        lastMagRaw = null;
+        magBuffer = [];
+        magPrev2 = null;
+        magPrev1 = null;
+        minSinceLastStep = Infinity;
+        hadValleySinceLastStep = true;
         driftWarningCount = 0;
         stepsEl.textContent = '0';
         if (distanceDisplay) distanceDisplay.textContent = '0.00';
@@ -525,12 +577,12 @@
       }
 
       function onMotion(e) {
-        const acc = e.accelerationIncludingGravity;
+        const acc = e.acceleration;
         if (acc) {
           accX.textContent = formatNum(acc.x);
           accY.textContent = formatNum(acc.y);
           accZ.textContent = formatNum(acc.z);
-          stepDetect(acc);
+          stepDetect(acc, Date.now());
         }
         const rot = e.rotationRate;
         const now = Date.now();
@@ -629,20 +681,21 @@
         trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: null };
         stepHistory = [];
         totalDistanceM = 0;
-        stepCycleAmax = 0;
-        stepCycleAmin = 1e9;
-        recentPeakHeights = [];
+        lastStepTime = 0;
+        lastStepDetectTime = null;
+        bpHpPrev = 0;
+        bpLpPrev = 0;
+        lastMagRaw = null;
+        magBuffer = [];
+        magPrev2 = null;
+        magPrev1 = null;
+        minSinceLastStep = Infinity;
+        hadValleySinceLastStep = true;
         headingGyroDeg = 0;
         lastGyroTime = null;
         headingFusedDeg = null;
         lastMagHeadingDeg = null;
         driftWarningCount = 0;
-        smoothedMagnitude = 0;
-        magnitudeBaseline = 0;
-        lastMagnitude = 0;
-        rising = false;
-        lastStepTime = 0;
-        hadValleySinceLastStep = false;
         recording = true;
         startListeners();
         statusEl.className = 'status recording';
