@@ -174,12 +174,60 @@
       cursor: pointer;
     }
     .btn-reset-all { padding: 0.9rem 1rem; font-size: 1rem; }
+    .video-preview-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16/10;
+      max-height: 200px;
+      background: var(--bg);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 0.5rem;
+    }
+    .video-preview-wrap video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .video-preview-wrap .video-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .video-zoom-controls {
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+    }
+    .video-zoom-controls.visible {
+      display: flex;
+    }
+    .video-zoom-controls button {
+      padding: 0.4rem 0.75rem;
+      font-size: 1rem;
+      min-width: 2.5rem;
+    }
+    .video-zoom-controls input[type="range"] {
+      flex: 1;
+      min-width: 80px;
+    }
+    .video-zoom-controls .zoom-value {
+      min-width: 2.5rem;
+      text-align: center;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>PDR Sensor Recorder</h1>
-    <p class="subtitle">Record IMU, gyro, magnetometer &amp; steps on your phone</p>
+    <p class="subtitle">Record IMU, gyro, magnetometer, steps &amp; video on your phone</p>
 
     <div id="status" class="status idle">
       <span class="status-dot"></span>
@@ -225,6 +273,21 @@
       <div class="row"><span class="label">γ</span><span class="value" id="orientGamma">—</span></div>
     </div>
 
+    <div class="card">
+      <h2>Video</h2>
+      <p class="message" style="margin:0 0 0.5rem 0">Camera records while IMU is recording. Preview below.</p>
+      <div class="video-preview-wrap">
+        <video id="videoPreview" playsinline muted autoplay style="display:none"></video>
+        <div id="videoPlaceholder" class="video-placeholder">Camera off. Tap Start to record video + IMU.</div>
+      </div>
+      <div id="videoZoomWrap" class="video-zoom-controls">
+        <button type="button" id="btnZoomOut" aria-label="Zoom out">−</button>
+        <input type="range" id="zoomSlider" min="1" max="4" step="0.1" value="1" aria-label="Zoom">
+        <span id="zoomValue" class="zoom-value">1×</span>
+        <button type="button" id="btnZoomIn" aria-label="Zoom in">+</button>
+      </div>
+    </div>
+
     <p id="message" class="message"></p>
 
     <div class="buttons">
@@ -232,6 +295,7 @@
       <button id="btnStop" class="btn-stop" disabled>Stop</button>
       <button id="btnResetAll" class="btn-reset-all">Reset all</button>
       <button id="btnDownload" class="btn-download" disabled>Download JSON</button>
+      <button id="btnDownloadVideo" class="btn-download" disabled title="Enabled after you Stop a recording that included camera">Download video</button>
     </div>
   </div>
 
@@ -253,8 +317,22 @@
       const btnStart = document.getElementById('btnStart');
       const btnStop = document.getElementById('btnStop');
       const btnDownload = document.getElementById('btnDownload');
+      const btnDownloadVideo = document.getElementById('btnDownloadVideo');
+      const videoPreview = document.getElementById('videoPreview');
+      const videoPlaceholder = document.getElementById('videoPlaceholder');
+      const videoZoomWrap = document.getElementById('videoZoomWrap');
+      const btnZoomOut = document.getElementById('btnZoomOut');
+      const btnZoomIn = document.getElementById('btnZoomIn');
+      const zoomSlider = document.getElementById('zoomSlider');
+      const zoomValue = document.getElementById('zoomValue');
 
       let recording = false;
+      let mediaStream = null;
+      let mediaRecorder = null;
+      let recordedVideoChunks = [];
+      let recordedVideoBlob = null;
+      let videoTrack = null;
+      let zoomCap = null;
       let recordBuffer = [];
       let stepCount = 0;
       let lastStepCountForTrajectory = 0;
@@ -675,6 +753,62 @@
         const ok = await requestPermission();
         if (!ok) return;
 
+        recordedVideoChunks = [];
+        recordedVideoBlob = null;
+        btnDownloadVideo.disabled = true;
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' } },
+            audio: false
+          });
+          videoPreview.srcObject = mediaStream;
+          videoPlaceholder.style.display = 'none';
+          videoPreview.style.display = 'block';
+
+          videoTrack = mediaStream.getVideoTracks()[0] || null;
+          zoomCap = null;
+          if (videoTrack && typeof videoTrack.getCapabilities === 'function') {
+            const cap = videoTrack.getCapabilities();
+            if (cap.zoom && (cap.zoom.min !== undefined || cap.zoom.max !== undefined)) {
+              zoomCap = {
+                min: cap.zoom.min != null ? cap.zoom.min : 1,
+                max: cap.zoom.max != null ? cap.zoom.max : 4,
+                step: cap.zoom.step != null ? cap.zoom.step : 0.1
+              };
+            }
+          }
+          if (zoomCap) {
+            videoZoomWrap.classList.add('visible');
+            zoomSlider.min = zoomCap.min;
+            zoomSlider.max = zoomCap.max;
+            zoomSlider.step = zoomCap.step;
+            zoomSlider.value = zoomCap.min;
+            zoomValue.textContent = zoomCap.min + '×';
+            applyZoom(zoomCap.min);
+          } else {
+            videoZoomWrap.classList.remove('visible');
+          }
+
+          const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+            ? 'video/webm;codecs=vp9'
+            : MediaRecorder.isTypeSupported('video/webm')
+              ? 'video/webm'
+              : '';
+          const options = mimeType ? { mimeType } : {};
+          mediaRecorder = new MediaRecorder(mediaStream, options);
+          mediaRecorder.ondataavailable = function (e) {
+            if (e.data && e.data.size > 0) recordedVideoChunks.push(e.data);
+          };
+          mediaRecorder.start(250);
+        } catch (err) {
+          setMessage('Camera not available: ' + err.message + '. IMU will still record.', 'error');
+          if (mediaStream) {
+            mediaStream.getTracks().forEach(function (t) { t.stop(); });
+            mediaStream = null;
+          }
+        }
+
         recordBuffer = [];
         stepCount = 0;
         lastStepCountForTrajectory = 0;
@@ -709,6 +843,38 @@
       function stopRecording() {
         recording = false;
         stopListeners();
+
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          const recorderMime = mediaRecorder.mimeType || 'video/webm';
+          mediaRecorder.onstop = function () {
+            if (recordedVideoChunks.length > 0) {
+              recordedVideoBlob = new Blob(recordedVideoChunks, { type: recorderMime });
+              btnDownloadVideo.disabled = false;
+              setMessage('Stopped. Download JSON or video below.', 'success');
+            } else {
+              setMessage('Stopped. No video data (record a few seconds and try again).', '');
+            }
+            if (mediaStream) {
+              mediaStream.getTracks().forEach(function (t) { t.stop(); });
+              mediaStream = null;
+            }
+            videoPreview.srcObject = null;
+            videoPreview.style.display = 'none';
+            videoPlaceholder.style.display = 'flex';
+          };
+          mediaRecorder.stop();
+        } else if (mediaStream) {
+          mediaStream.getTracks().forEach(function (t) { t.stop(); });
+          mediaStream = null;
+          videoPreview.srcObject = null;
+          videoPreview.style.display = 'none';
+          videoPlaceholder.style.display = 'flex';
+        }
+        mediaRecorder = null;
+        videoTrack = null;
+        zoomCap = null;
+        videoZoomWrap.classList.remove('visible');
+
         statusEl.className = 'status idle';
         statusText.textContent = 'Stopped';
         btnStart.disabled = false;
@@ -742,11 +908,44 @@
         setMessage('Download started.', 'success');
       }
 
+      function applyZoom(value) {
+        if (!videoTrack || !zoomCap) return;
+        const num = Math.max(zoomCap.min, Math.min(zoomCap.max, Number(value)));
+        videoTrack.applyConstraints({ zoom: num }).catch(function (err) {
+          setMessage('Zoom failed: ' + err.message, 'error');
+        });
+        zoomSlider.value = num;
+        zoomValue.textContent = Math.round(num * 10) / 10 + '×';
+      }
+
+      function downloadVideo() {
+        if (!recordedVideoBlob) return;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(recordedVideoBlob);
+        a.download = 'pdr-video-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.webm';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        setMessage('Video download started.', 'success');
+      }
+
       btnStart.addEventListener('click', startRecording);
       btnStop.addEventListener('click', stopRecording);
       btnDownload.addEventListener('click', downloadData);
+      btnDownloadVideo.addEventListener('click', downloadVideo);
       btnResetAll.addEventListener('click', resetAll);
       btnResetTrajectory.addEventListener('click', resetAll);
+
+      btnZoomOut.addEventListener('click', function () {
+        const v = Math.max(zoomCap ? zoomCap.min : 1, Number(zoomSlider.value) - (zoomCap ? zoomCap.step : 0.5));
+        applyZoom(v);
+      });
+      btnZoomIn.addEventListener('click', function () {
+        const v = Math.min(zoomCap ? zoomCap.max : 4, Number(zoomSlider.value) + (zoomCap ? zoomCap.step : 0.5));
+        applyZoom(v);
+      });
+      zoomSlider.addEventListener('input', function () {
+        applyZoom(zoomSlider.value);
+      });
 
       window.addEventListener('resize', function () {
         drawTrajectory();
