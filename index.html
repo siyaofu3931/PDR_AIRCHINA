@@ -362,16 +362,26 @@
       let stepHistory = [];
       let totalDistanceM = 0;
 
-      // Heading fusion: gyro integration + magnetometer complementary + drift correction
+      // Heading fusion: 1D Kalman filter for heading + gyro bias.
+      const headingFilterConfig = {
+        initWindowMs: 1500,
+        minInitSamples: 8,
+        processNoiseHeadingDeg2PerSec: 4,
+        processNoiseBiasDeg2PerSec: 0.02,
+        measNoiseStableDeg2: 16,
+        measNoiseDisturbedDeg2: 144,
+        magJumpThresholdDeg: 25
+      };
       let headingGyroDeg = 0;
       let lastGyroTime = null;
       let headingFusedDeg = null;
       let lastMagHeadingDeg = null;
-      let magReliability = 1;
-      const FUSION_ALPHA_STABLE = 0.45;
-      const FUSION_ALPHA_DISTURBED = 0.85;
-      const GYRO_DRIFT_CORRECT_GAIN = 0.22;
-      const MAG_JUMP_THRESHOLD_DEG = 25;
+      let headingStateDeg = 0;
+      let headingBiasDegPerSec = 0;
+      let headingCov = { p00: 400, p01: 0, p10: 0, p11: 25 };
+      let headingInitialized = false;
+      let headingInitStartMs = null;
+      let initialHeadingSamples = [];
       // Gyro alpha sign: 1 = W3C (positive = turn right). Use -1 if when you turn LEFT the trajectory turns RIGHT (e.g. some iOS).
       const GYRO_ALPHA_SIGN = -1;
       let driftWarningCount = 0;
@@ -502,7 +512,10 @@
       function updateTrajectory() {
         if (stepCount <= lastStepCountForTrajectory) return;
         const newSteps = stepCount - lastStepCountForTrajectory;
-        const headingDeg = (headingFusedDeg != null ? headingFusedDeg : (lastOrientation && lastOrientation.alpha != null ? lastOrientation.alpha : 0));
+        const fallbackHeading = lastOrientation
+          ? (lastOrientation.webkitCompassHeading != null ? lastOrientation.webkitCompassHeading : lastOrientation.alpha)
+          : 0;
+        const headingDeg = (headingFusedDeg != null ? headingFusedDeg : fallbackHeading);
         trajectory.headingDeg = headingDeg;
         const rad = (headingDeg * Math.PI) / 180;
         // Step in heading direction: 0° = North (+y), 90° = East (+x). Turn left → heading decreases → trajectory goes left on map.
@@ -520,7 +533,9 @@
       }
 
       function updateTrajectoryHeadingOnly() {
-        const h = headingFusedDeg != null ? headingFusedDeg : (lastOrientation && lastOrientation.alpha != null ? lastOrientation.alpha : null);
+        const h = headingFusedDeg != null
+          ? headingFusedDeg
+          : (lastOrientation ? (lastOrientation.webkitCompassHeading != null ? lastOrientation.webkitCompassHeading : lastOrientation.alpha) : null);
         if (h != null) trajectory.headingDeg = h;
         drawTrajectory();
         updateTrajectoryInfo();
@@ -611,7 +626,7 @@
         magPrev1 = null;
         minSinceLastStep = Infinity;
         hadValleySinceLastStep = true;
-        driftWarningCount = 0;
+        resetHeadingFilter();
         stepsEl.textContent = '0';
         if (distanceDisplay) distanceDisplay.textContent = '0.00';
         drawTrajectory();
@@ -632,7 +647,13 @@
           acceleration: acc ? { x: acc.x, y: acc.y, z: acc.z } : null,
           accelerationIncludingGravity: accG ? { x: accG.x, y: accG.y, z: accG.z } : null,
           rotationRate: { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma },
-          orientation: orientation ? { alpha: orientation.alpha, beta: orientation.beta, gamma: orientation.gamma, absolute: orientation.absolute } : null,
+          orientation: orientation ? {
+            alpha: orientation.alpha,
+            beta: orientation.beta,
+            gamma: orientation.gamma,
+            absolute: orientation.absolute,
+            webkitCompassHeading: orientation.webkitCompassHeading
+          } : null,
           steps: stepCount,
           position: { x: trajectory.x, y: trajectory.y },
           heading_fused: headingFusedDeg
@@ -654,6 +675,104 @@
         return d;
       }
 
+      function circularMeanDeg(values) {
+        if (!values.length) return null;
+        let sinSum = 0;
+        let cosSum = 0;
+        values.forEach(function (deg) {
+          const rad = deg * Math.PI / 180;
+          sinSum += Math.sin(rad);
+          cosSum += Math.cos(rad);
+        });
+        return normalizeAngle360(Math.atan2(sinSum, cosSum) * 180 / Math.PI);
+      }
+
+      function resetHeadingFilter() {
+        headingGyroDeg = 0;
+        lastGyroTime = null;
+        headingFusedDeg = null;
+        lastMagHeadingDeg = null;
+        headingStateDeg = 0;
+        headingBiasDegPerSec = 0;
+        headingCov = { p00: 400, p01: 0, p10: 0, p11: 25 };
+        headingInitialized = false;
+        headingInitStartMs = null;
+        initialHeadingSamples = [];
+        driftWarningCount = 0;
+      }
+
+      function initializeHeadingFilter(nowMs, initialHeadingDeg) {
+        const headingDeg = normalizeAngle360(initialHeadingDeg);
+        headingStateDeg = headingDeg;
+        headingGyroDeg = headingDeg;
+        headingFusedDeg = headingDeg;
+        headingBiasDegPerSec = 0;
+        headingCov = { p00: 25, p01: 0, p10: 0, p11: 4 };
+        headingInitialized = true;
+        lastGyroTime = nowMs;
+        lastMagHeadingDeg = headingDeg;
+      }
+
+      function predictHeadingEkf(yawRateDegSec, nowMs) {
+        if (lastGyroTime == null) {
+          lastGyroTime = nowMs;
+          return;
+        }
+        const dt = Math.min((nowMs - lastGyroTime) / 1000, 0.1);
+        lastGyroTime = nowMs;
+        if (!headingInitialized || dt <= 0) return;
+
+        const signedYawRateDegSec = GYRO_ALPHA_SIGN * yawRateDegSec;
+        headingStateDeg = normalizeAngle360(headingStateDeg + (signedYawRateDegSec - headingBiasDegPerSec) * dt);
+        headingGyroDeg = headingStateDeg;
+        headingFusedDeg = headingStateDeg;
+
+        const p00 = headingCov.p00;
+        const p01 = headingCov.p01;
+        const p10 = headingCov.p10;
+        const p11 = headingCov.p11;
+        const qHeading = headingFilterConfig.processNoiseHeadingDeg2PerSec;
+        const qBias = headingFilterConfig.processNoiseBiasDeg2PerSec;
+        const q00 = qHeading * dt + qBias * dt * dt * dt / 3;
+        const q01 = -qBias * dt * dt / 2;
+        const q11 = qBias * dt;
+
+        headingCov.p00 = p00 - dt * p01 - dt * p10 + dt * dt * p11 + q00;
+        headingCov.p01 = p01 - dt * p11 + q01;
+        headingCov.p10 = p10 - dt * p11 + q01;
+        headingCov.p11 = p11 + q11;
+      }
+
+      function updateHeadingEkf(measuredHeadingDeg) {
+        if (!headingInitialized) return 0;
+
+        const magJump = lastMagHeadingDeg != null
+          ? Math.abs(angularDiffDeg(lastMagHeadingDeg, measuredHeadingDeg))
+          : 0;
+        lastMagHeadingDeg = measuredHeadingDeg;
+
+        const innovationDeg = angularDiffDeg(headingStateDeg, measuredHeadingDeg);
+        const measurementNoise = magJump > headingFilterConfig.magJumpThresholdDeg
+          ? headingFilterConfig.measNoiseDisturbedDeg2
+          : headingFilterConfig.measNoiseStableDeg2;
+        const s = headingCov.p00 + measurementNoise;
+        const k0 = headingCov.p00 / s;
+        const k1 = headingCov.p10 / s;
+        const p00 = headingCov.p00;
+        const p01 = headingCov.p01;
+        const p10 = headingCov.p10;
+        const p11 = headingCov.p11;
+
+        headingStateDeg = normalizeAngle360(headingStateDeg + k0 * innovationDeg);
+        headingBiasDegPerSec += k1 * innovationDeg;
+        headingCov.p00 = (1 - k0) * p00;
+        headingCov.p01 = (1 - k0) * p01;
+        headingCov.p10 = p10 - k1 * p00;
+        headingCov.p11 = p11 - k1 * p01;
+        headingFusedDeg = headingStateDeg;
+        return innovationDeg;
+      }
+
       function onMotion(e) {
         const acc = e.acceleration;
         if (acc) {
@@ -665,12 +784,22 @@
         const rot = e.rotationRate;
         const now = Date.now();
         if (rot && rot.alpha != null && !Number.isNaN(rot.alpha)) {
-          if (lastGyroTime != null) {
-            const dt = (now - lastGyroTime) / 1000;
-            headingGyroDeg += GYRO_ALPHA_SIGN * rot.alpha * dt;
-            headingGyroDeg = normalizeAngle360(headingGyroDeg);
+          let yawRateDegSec = rot.alpha;
+          const accG = e.accelerationIncludingGravity;
+          if (accG && accG.x != null && accG.y != null && accG.z != null) {
+            // Project gyro onto gravity so yaw integration still works when phone pose changes.
+            const gNorm = Math.sqrt(accG.x * accG.x + accG.y * accG.y + accG.z * accG.z);
+            if (gNorm > 2) {
+              const ux = accG.x / gNorm;
+              const uy = accG.y / gNorm;
+              const uz = accG.z / gNorm;
+              const rotX = rot.gamma != null && !Number.isNaN(rot.gamma) ? rot.gamma : 0;
+              const rotY = rot.beta != null && !Number.isNaN(rot.beta) ? rot.beta : 0;
+              const rotZ = rot.alpha;
+              yawRateDegSec = rotX * ux + rotY * uy + rotZ * uz;
+            }
           }
-          lastGyroTime = now;
+          predictHeadingEkf(yawRateDegSec, now);
           gyroAlpha.textContent = formatNum(rot.alpha);
           gyroBeta.textContent = formatNum(rot.beta);
           gyroGamma.textContent = formatNum(rot.gamma);
@@ -681,31 +810,41 @@
       }
 
       function onOrientation(e) {
-        lastOrientation = { alpha: e.alpha, beta: e.beta, gamma: e.gamma, absolute: e.absolute };
-        orientAlpha.textContent = formatNum(e.alpha);
+        const now = Date.now();
+        const webkitHeading = (e.webkitCompassHeading != null && !Number.isNaN(e.webkitCompassHeading))
+          ? normalizeAngle360(e.webkitCompassHeading)
+          : null;
+        const compassHeading = webkitHeading != null
+          ? webkitHeading
+          : (e.alpha != null && !Number.isNaN(e.alpha) ? normalizeAngle360(e.alpha) : null);
+        lastOrientation = {
+          alpha: e.alpha,
+          beta: e.beta,
+          gamma: e.gamma,
+          absolute: e.absolute,
+          webkitCompassHeading: e.webkitCompassHeading
+        };
+        orientAlpha.textContent = formatNum(compassHeading != null ? compassHeading : e.alpha);
         orientBeta.textContent = formatNum(e.beta);
         orientGamma.textContent = formatNum(e.gamma);
-        if (e.alpha != null && !Number.isNaN(e.alpha)) {
-          const magDeg = normalizeAngle360(e.alpha);
-          if (lastGyroTime == null) {
-            headingGyroDeg = magDeg;
-            headingFusedDeg = magDeg;
-            lastMagHeadingDeg = magDeg;
-          } else {
-            const magJump = lastMagHeadingDeg != null ? Math.abs(angularDiffDeg(lastMagHeadingDeg, magDeg)) : 0;
-            if (magJump > MAG_JUMP_THRESHOLD_DEG) magReliability = FUSION_ALPHA_DISTURBED;
-            else magReliability = FUSION_ALPHA_STABLE;
-            lastMagHeadingDeg = magDeg;
-            headingGyroDeg += GYRO_DRIFT_CORRECT_GAIN * angularDiffDeg(headingGyroDeg, magDeg);
-            headingGyroDeg = normalizeAngle360(headingGyroDeg);
+        if (compassHeading != null) {
+          if (!headingInitialized) {
+            if (headingInitStartMs == null) headingInitStartMs = now;
+            initialHeadingSamples.push(webkitHeading != null ? webkitHeading : compassHeading);
+            const initWindowDone = (now - headingInitStartMs) >= headingFilterConfig.initWindowMs;
+            if ((initWindowDone || initialHeadingSamples.length >= headingFilterConfig.minInitSamples) && initialHeadingSamples.length > 0) {
+              initializeHeadingFilter(now, circularMeanDeg(initialHeadingSamples));
+            } else {
+              headingFusedDeg = circularMeanDeg(initialHeadingSamples);
+            }
           }
-          const diff = Math.abs(angularDiffDeg(headingGyroDeg, magDeg));
-          if (diff > DRIFT_THRESHOLD_DEG) {
-            driftWarningCount++;
-            if (driftWarningCount >= DRIFT_WARN_SAMPLES) setMessage('Possible heading drift. Consider calibrating at a landmark.', 'error');
-          } else driftWarningCount = 0;
-          headingFusedDeg = magReliability * headingGyroDeg + (1 - magReliability) * magDeg;
-          headingFusedDeg = normalizeAngle360(headingFusedDeg);
+          if (headingInitialized) {
+            const diff = Math.abs(updateHeadingEkf(compassHeading));
+            if (diff > DRIFT_THRESHOLD_DEG) {
+              driftWarningCount++;
+              if (driftWarningCount >= DRIFT_WARN_SAMPLES) setMessage('Possible heading drift. Consider calibrating at a landmark.', 'error');
+            } else driftWarningCount = 0;
+          }
         }
         updateTrajectoryHeadingOnly();
       }
@@ -825,11 +964,7 @@
         magPrev1 = null;
         minSinceLastStep = Infinity;
         hadValleySinceLastStep = true;
-        headingGyroDeg = 0;
-        lastGyroTime = null;
-        headingFusedDeg = null;
-        lastMagHeadingDeg = null;
-        driftWarningCount = 0;
+        resetHeadingFilter();
         recording = true;
         startListeners();
         statusEl.className = 'status recording';
