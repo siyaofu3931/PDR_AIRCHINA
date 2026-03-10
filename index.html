@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>机场旅客定位测试(国航内部演示版v0.1)</title>
+  <title>机场旅客定位测试(国航内部预览版v0.2)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <style>
@@ -209,6 +209,19 @@
       border-radius: 8px;
       z-index: 0;
     }
+    .user-arrow-wrapper {
+      background: transparent;
+      border: none;
+    }
+    .user-arrow-icon {
+      width: 0;
+      height: 0;
+      border-left: 9px solid transparent;
+      border-right: 9px solid transparent;
+      border-bottom: 18px solid #ff453a;
+      transform-origin: 50% 66%;
+      filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.5));
+    }
     .trajectory-actions {
       display: flex;
       justify-content: space-between;
@@ -407,7 +420,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>机场旅客定位测试(国航内部演示版v0.1)</h1>
+    <h1>机场旅客定位测试(国航内部预览版v0.2)</h1>
 
     <div id="status" class="status idle">
       <span class="status-dot"></span>
@@ -903,18 +916,30 @@
           fillOpacity: 0.9
         }).addTo(map).bindTooltip('当前位置', { permanent: false, direction: 'top' });
         trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.9 }).addTo(map);
-        positionMarker = L.circleMarker([mapOriginLat, mapOriginLng], {
-          radius: 8,
-          fillColor: '#ff453a',
-          color: '#e8e8ec',
-          weight: 2,
-          fillOpacity: 1
+        positionMarker = L.marker([mapOriginLat, mapOriginLng], {
+          icon: L.divIcon({
+            className: 'user-arrow-wrapper',
+            html: '<div class="user-arrow-icon"></div>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+          }),
+          keyboard: false
         }).addTo(map);
         map.on('click', function (e) {
           if (recording) return;
           setMapOrigin(e.latlng.lat, e.latlng.lng);
           setMessage('位置已设置，准备好后点击开始。', 'success');
         });
+      }
+
+      function updateUserArrowHeading() {
+        if (!positionMarker) return;
+        const el = positionMarker.getElement();
+        if (!el) return;
+        const arrow = el.querySelector('.user-arrow-icon');
+        if (!arrow) return;
+        const h = trajectory.headingDeg != null ? trajectory.headingDeg : 0;
+        arrow.style.transform = 'rotate(' + h.toFixed(1) + 'deg)';
       }
 
       function updateMapTrajectory() {
@@ -924,6 +949,7 @@
         trajectoryPolyline.setLatLngs(latlngs);
         const current = metersToLatLng(trajectory.x, trajectory.y);
         positionMarker.setLatLng(current);
+        updateUserArrowHeading();
         if (latlngs.length >= 2) {
           const bounds = L.latLngBounds(latlngs);
           map.fitBounds(bounds.pad(0.15));
