@@ -5,25 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
-  <title>机场旅客定位演示版</title>
+  <title>机场旅客定位测试(国航内部演示版v0.1)</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <style>
     :root {
-      --bg: #0f0f12;
-      --surface: #1a1a1f;
-      --border: #2a2a32;
-      --text: #e8e8ec;
-      --muted: #888;
-      --accent: #4a9eff;
-      --success: #34c759;
-      --danger: #ff453a;
+      --bg: #14090b;
+      --surface: #221115;
+      --border: #4a2429;
+      --text: #f2ebe8;
+      --muted: #b9a9a2;
+      --accent: #c30f2f;
+      --gold: #d4a34a;
+      --success: #b58a34;
+      --danger: #8f1010;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
+      background:
+        radial-gradient(circle at 18% 0%, rgba(212, 163, 74, 0.2), transparent 30%),
+        radial-gradient(circle at 95% 8%, rgba(195, 15, 47, 0.35), transparent 40%),
+        linear-gradient(180deg, #230b10 0%, #14090b 44%, #0d0809 100%);
       color: var(--text);
       min-height: 100vh;
       padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -39,7 +43,8 @@
       font-size: 1.25rem;
       font-weight: 600;
       margin: 0 0 0.5rem;
-      color: var(--text);
+      color: var(--gold);
+      text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
     }
     .card {
       background: var(--surface);
@@ -47,6 +52,7 @@
       border-radius: 12px;
       padding: 0.8rem 0.9rem;
       margin-bottom: 0.75rem;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
     }
     .card h2 {
       font-size: 0.75rem;
@@ -114,7 +120,7 @@
     .vi-fill {
       height: 100%;
       width: 0%;
-      background: linear-gradient(90deg, #34c759, #ff9f0a, #ff453a);
+      background: linear-gradient(90deg, var(--gold), #d97f2b, var(--accent));
       transition: width 120ms linear;
     }
     .buttons {
@@ -285,7 +291,7 @@
     }
     .switch-tag.active {
       color: #fff;
-      background: var(--accent);
+      background: linear-gradient(90deg, var(--accent), #8d1736);
     }
     .overlap-stage {
       position: relative;
@@ -401,7 +407,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>机场旅客定位演示版</h1>
+    <h1>机场旅客定位测试(国航内部演示版v0.1)</h1>
 
     <div id="status" class="status idle">
       <span class="status-dot"></span>
