@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from .engine import PdrEngine
 
 
-app = FastAPI(title="PDR Backend Engine", version="0.1.0")
+app = FastAPI(title="PDR Backend Engine", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
