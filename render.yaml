@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: airchina-pdr-v0-9
+    runtime: static
+    repo: https://github.com/simon-jian/pedestrian_dead_reckoning.git
+    branch: chinese-version
+    buildCommand: echo "Static site deploy"
+    staticPublishPath: .
+    pullRequestPreviewsEnabled: false
