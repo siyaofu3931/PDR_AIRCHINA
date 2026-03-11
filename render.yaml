@@ -1,9 +1,10 @@
 services:
   - type: web
-    name: airchina-pdr-v0-9
-    runtime: static
-    repo: https://github.com/simon-jian/pedestrian_dead_reckoning.git
-    branch: chinese-version
-    buildCommand: echo "Static site deploy"
-    staticPublishPath: .
+    name: pdr-airchina-v1-0
+    runtime: python
+    repo: https://github.com/siyaofu3931/PDR_AIRCHINA.git
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install fastapi "uvicorn[standard]"
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     pullRequestPreviewsEnabled: false
