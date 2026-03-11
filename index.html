@@ -231,6 +231,12 @@
       color: var(--muted);
       gap: 0.5rem;
     }
+    .trajectory-btn-group {
+      display: inline-flex;
+      gap: 0.35rem;
+      align-items: center;
+      flex-shrink: 0;
+    }
     .btn-reset-all, .btn-reset-trajectory {
       padding: 0.45rem 0.55rem;
       font-size: 0.72rem;
@@ -239,6 +245,20 @@
       border: none;
       border-radius: 6px;
       cursor: pointer;
+    }
+    .btn-indoor-correction {
+      padding: 0.45rem 0.55rem;
+      font-size: 0.72rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .btn-indoor-correction.enabled {
+      border-color: #2f66d0;
+      background: rgba(74, 158, 255, 0.2);
+      color: #d7e8ff;
     }
     .btn-reset-all { padding: 0.62rem 0.65rem; font-size: 0.85rem; }
     .sensor-grid {
@@ -453,7 +473,10 @@
       </div>
       <div class="trajectory-actions">
         <span id="trajectoryInfo">东向: 0 m，北向: 0 m，航向: —°</span>
-        <button type="button" id="btnResetTrajectory" class="btn-reset-trajectory">重置</button>
+        <div class="trajectory-btn-group">
+          <button type="button" id="btnIndoorCorrection" class="btn-indoor-correction enabled">室内环境修正: 开</button>
+          <button type="button" id="btnResetTrajectory" class="btn-reset-trajectory">重置</button>
+        </div>
       </div>
     </div>
 
@@ -586,11 +609,20 @@
       const METERS_PER_DEG_LAT = 111320;
       let map = null;
       let trajectoryPolyline = null;
+      let trajectoryRawPolyline = null;
+      let trajectorySegmentLayer = null;
       let positionMarker = null;
       let originMarker = null;
       const btnResetAll = document.getElementById('btnResetAll');
       const btnResetTrajectory = document.getElementById('btnResetTrajectory');
+      const btnIndoorCorrection = document.getElementById('btnIndoorCorrection');
       const distanceDisplay = document.getElementById('distanceDisplay');
+      let indoorCorrectionEnabled = true;
+      const indoorCorrectionConfig = {
+        turnThresholdDeg: 30,
+        straightMinDistanceM: 10,
+        turnWindowEdges: 2
+      };
 
       // Weinberg: step_length = K_weinberg * (a_max - a_min)^0.25
       let K_weinberg = 0.5;
@@ -656,6 +688,65 @@
       function setMessage(text, type) {
         messageEl.textContent = text || '';
         messageEl.className = 'message' + (type ? ' ' + type : '');
+      }
+
+      function updateIndoorCorrectionButton() {
+        if (!btnIndoorCorrection) return;
+        btnIndoorCorrection.classList.toggle('enabled', indoorCorrectionEnabled);
+        btnIndoorCorrection.textContent = '室内环境修正: ' + (indoorCorrectionEnabled ? '开' : '关');
+      }
+
+      function pointDistM(a, b) {
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+
+      function extractIndoorSegments(points) {
+        if (!points || points.length < 2) return [];
+        const edges = [];
+        for (let i = 1; i < points.length; i++) {
+          const a = points[i - 1];
+          const b = points[i];
+          const d = pointDistM(a, b);
+          if (d < 0.02) continue;
+          const h = Math.atan2(b.x - a.x, b.y - a.y) * 180 / Math.PI;
+          edges.push({ startIdx: i - 1, endIdx: i, dist: d, heading: h });
+        }
+        if (!edges.length) return [];
+
+        const turnEdgeSet = new Set();
+        for (let i = 1; i < edges.length; i++) {
+          const dHeading = Math.abs(angularDiffDeg(edges[i - 1].heading, edges[i].heading));
+          if (dHeading >= indoorCorrectionConfig.turnThresholdDeg) {
+            const s = Math.max(0, i - indoorCorrectionConfig.turnWindowEdges);
+            const e = Math.min(edges.length - 1, i + indoorCorrectionConfig.turnWindowEdges);
+            for (let k = s; k <= e; k++) turnEdgeSet.add(k);
+          }
+        }
+
+        const segments = [];
+        let runStart = 0;
+        let runTurn = turnEdgeSet.has(0);
+        for (let i = 1; i <= edges.length; i++) {
+          const same = i < edges.length && turnEdgeSet.has(i) === runTurn;
+          if (same) continue;
+          const runEdges = edges.slice(runStart, i);
+          const runStartIdx = runEdges[0].startIdx;
+          const runEndIdx = runEdges[runEdges.length - 1].endIdx;
+          const runDist = runEdges.reduce(function (s, e) { return s + e.dist; }, 0);
+          let runPoints = points.slice(runStartIdx, runEndIdx + 1);
+          if (!runTurn && runDist >= indoorCorrectionConfig.straightMinDistanceM && runPoints.length >= 2) {
+            runPoints = [runPoints[0], runPoints[runPoints.length - 1]];
+          }
+          segments.push({
+            type: runTurn ? 'turn' : 'straight',
+            points: runPoints
+          });
+          runStart = i;
+          runTurn = turnEdgeSet.has(i);
+        }
+        return segments.filter(function (seg) { return seg.points && seg.points.length >= 2; });
       }
 
       const plotMaxPoints = 120;
@@ -916,6 +1007,8 @@
           fillOpacity: 0.9
         }).addTo(map).bindTooltip('当前位置', { permanent: false, direction: 'top' });
         trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.9 }).addTo(map);
+        trajectoryRawPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.95 }).addTo(map);
+        trajectorySegmentLayer = L.layerGroup().addTo(map);
         positionMarker = L.marker([mapOriginLat, mapOriginLng], {
           icon: L.divIcon({
             className: 'user-arrow-wrapper',
@@ -946,7 +1039,23 @@
         if (!map || !trajectoryPolyline || !positionMarker) return;
         const pts = trajectory.path;
         const latlngs = pts.map(function (p) { return metersToLatLng(p.x, p.y); });
-        trajectoryPolyline.setLatLngs(latlngs);
+        trajectoryPolyline.setLatLngs([]);
+        if (indoorCorrectionEnabled) {
+          trajectoryRawPolyline.setLatLngs([]);
+          trajectorySegmentLayer.clearLayers();
+          const correctedSegments = extractIndoorSegments(pts);
+          correctedSegments.forEach(function (seg) {
+            const segLatLngs = seg.points.map(function (p) { return metersToLatLng(p.x, p.y); });
+            L.polyline(segLatLngs, {
+              color: seg.type === 'turn' ? '#ff2d2d' : '#2d7fff',
+              weight: 4,
+              opacity: 0.95
+            }).addTo(trajectorySegmentLayer);
+          });
+        } else {
+          trajectorySegmentLayer.clearLayers();
+          trajectoryRawPolyline.setLatLngs(latlngs);
+        }
         const current = metersToLatLng(trajectory.x, trajectory.y);
         positionMarker.setLatLng(current);
         updateUserArrowHeading();
@@ -964,6 +1073,8 @@
       }
 
       function resetAll() {
+        indoorCorrectionEnabled = true;
+        updateIndoorCorrectionButton();
         stepCount = 0;
         lastStepCountForTrajectory = 0;
         viLevel = 0;
@@ -1253,6 +1364,8 @@
       }
 
       async function startRecording() {
+        indoorCorrectionEnabled = true;
+        updateIndoorCorrectionButton();
         setMessage('正在请求传感器权限…', '');
         const ok = await requestPermission();
         if (!ok) return;
@@ -1439,6 +1552,11 @@
       btnDownloadVideo.addEventListener('click', downloadVideo);
       btnResetAll.addEventListener('click', resetAll);
       btnResetTrajectory.addEventListener('click', resetAll);
+      btnIndoorCorrection.addEventListener('click', function () {
+        indoorCorrectionEnabled = !indoorCorrectionEnabled;
+        updateIndoorCorrectionButton();
+        drawTrajectory();
+      });
 
       btnZoomOut.addEventListener('click', function () {
         const v = Math.max(zoomCap ? zoomCap.min : 1, Number(zoomSlider.value) - (zoomCap ? zoomCap.step : 0.5));
@@ -1465,6 +1583,7 @@
       if (mapContainer) initMap();
       drawTrajectory();
       setFrontCard('sensors');
+      updateIndoorCorrectionButton();
       drawPlot(sensorPlots.acc);
       drawPlot(sensorPlots.gyro);
       drawPlot(sensorPlots.orient);
