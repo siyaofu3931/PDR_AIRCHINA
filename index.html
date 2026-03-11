@@ -154,18 +154,9 @@
     }
     .buttons {
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 0.45rem;
       margin-top: 0.75rem;
-    }
-    .buttons > button:nth-child(1),
-    .buttons > button:nth-child(2) {
-      grid-column: span 3;
-    }
-    .buttons > button:nth-child(3),
-    .buttons > button:nth-child(4),
-    .buttons > button:nth-child(5) {
-      grid-column: span 2;
     }
     button {
       padding: 0.62rem 0.65rem;
@@ -474,7 +465,6 @@
       <div class="switch-tags" role="tablist" aria-label="页面切换">
         <button type="button" id="tagTrajectory" class="switch-tag active" role="tab" aria-selected="true">轨迹</button>
         <button type="button" id="tagVideo" class="switch-tag" role="tab" aria-selected="false">视频</button>
-        <button type="button" id="tagSensors" class="switch-tag" role="tab" aria-selected="false">传感器</button>
       </div>
     </div>
 
@@ -512,7 +502,7 @@
         <div id="trajectoryMap"></div>
       </div>
       <div class="trajectory-actions">
-        <span id="trajectoryInfo">东向: 0 m，北向: 0 m，航向: —°</span>
+        <span id="trajectoryInfo"></span>
         <div class="trajectory-btn-group">
           <button type="button" id="btnIndoorCorrection" class="btn-indoor-correction">室内环境修正: 关</button>
           <button type="button" id="btnResetTrajectory" class="btn-reset-trajectory">重置</button>
@@ -522,7 +512,7 @@
 
     <div class="sensor-video-switcher">
       <div id="sensorVideoStage" class="overlap-stage" data-active="sensors">
-      <div id="sensorCard" class="card stack-card sensor-stack-card">
+      <div id="sensorCard" class="card stack-card sensor-stack-card is-hidden">
         <h2>传感器</h2>
         <div class="sensor-grid">
           <div class="sensor-block">
@@ -555,11 +545,9 @@
         </div>
       </div>
       <div id="videoCard" class="card stack-card video-stack-card">
-        <h2>视频</h2>
-        <p class="message" style="margin:0 0 0.5rem 0">记录 IMU 的同时录制视频，预览如下。</p>
         <div class="video-preview-wrap">
           <video id="videoPreview" playsinline muted autoplay style="display:none"></video>
-          <div id="videoPlaceholder" class="video-placeholder">相机未开启。点击开始以录制视频 + IMU。</div>
+          <div id="videoPlaceholder" class="video-placeholder"></div>
         </div>
         <div id="videoZoomWrap" class="video-zoom-controls">
           <button type="button" id="btnZoomOut" aria-label="缩小">−</button>
@@ -577,8 +565,6 @@
       <button id="btnStart" class="btn-start">开始</button>
       <button id="btnStop" class="btn-stop" disabled>停止</button>
       <button id="btnResetAll" class="btn-reset-all">重置全部</button>
-      <button id="btnDownload" class="btn-download" disabled>下载 JSON</button>
-      <button id="btnDownloadVideo" class="btn-download" disabled title="停止一次包含相机的录制后可用">下载视频</button>
     </div>
   </div>
 
@@ -599,8 +585,6 @@
       const messageEl = document.getElementById('message');
       const btnStart = document.getElementById('btnStart');
       const btnStop = document.getElementById('btnStop');
-      const btnDownload = document.getElementById('btnDownload');
-      const btnDownloadVideo = document.getElementById('btnDownloadVideo');
       const videoPreview = document.getElementById('videoPreview');
       const videoPlaceholder = document.getElementById('videoPlaceholder');
       const videoZoomWrap = document.getElementById('videoZoomWrap');
@@ -617,7 +601,6 @@
       const gyroPlot = document.getElementById('gyroPlot');
       const orientPlot = document.getElementById('orientPlot');
       const tagTrajectory = document.getElementById('tagTrajectory');
-      const tagSensors = document.getElementById('tagSensors');
       const tagVideo = document.getElementById('tagVideo');
       const sensorVideoStage = document.getElementById('sensorVideoStage');
       const stepsCard = document.getElementById('stepsCard');
@@ -637,7 +620,7 @@
       let lastStepCountForTrajectory = 0;
       let viLevel = 0;
 
-      // Trajectory state (PDR Phase 1: Weinberg step length + fused heading)
+      // Trajectory state (computed from backend PDR pose updates)
       let trajectory = {
         path: [{ x: 0, y: 0 }],
         x: 0,
@@ -667,61 +650,15 @@
         turnWindowEdges: 2
       };
 
-      // Weinberg: step_length = K_weinberg * (a_max - a_min)^0.25
-      let K_weinberg = 0.5;
       let stepHistory = [];
       let totalDistanceM = 0;
-
-      // Heading fusion: 1D Kalman filter for heading + gyro bias.
-      const headingFilterConfig = {
-        initWindowMs: 1500,
-        minInitSamples: 8,
-        processNoiseHeadingDeg2PerSec: 4,
-        processNoiseBiasDeg2PerSec: 0.02,
-        measNoiseStableDeg2: 16,
-        measNoiseDisturbedDeg2: 144,
-        magJumpThresholdDeg: 25
-      };
-      let headingGyroDeg = 0;
-      let lastGyroTime = null;
       let headingFusedDeg = null;
-      let lastMagHeadingDeg = null;
-      let headingStateDeg = 0;
-      let headingBiasDegPerSec = 0;
-      let headingCov = { p00: 400, p01: 0, p10: 0, p11: 25 };
-      let headingInitialized = false;
-      let headingInitStartMs = null;
-      let initialHeadingSamples = [];
-      // Gyro alpha sign: 1 = W3C (positive = turn right). Use -1 if when you turn LEFT the trajectory turns RIGHT (e.g. some iOS).
-      const GYRO_ALPHA_SIGN = -1;
-      let driftWarningCount = 0;
-      const DRIFT_THRESHOLD_DEG = 35;
-      const DRIFT_WARN_SAMPLES = 40;
+      let lastOrientation = null;
 
-      // --- Step detection config ---
-      // Band-pass keeps 0.5–3 Hz (walking); adaptive threshold and valley/prominence reduce false steps from shake.
-      const stepConfig = {
-        minPeriodMs: 350,           // Minimum time between two consecutive steps (ms); rejects very fast double peaks.
-        adaptiveWindowMs: 2000,     // Window length for computing mean μ and std σ of the filtered signal.
-        adaptiveK: 0.5,             // Threshold = μ + k*σ; higher k = stricter (fewer false steps, may miss weak steps).
-        bandpassLowHz: 0.5,         // High-pass cutoff (Hz); removes drift and DC.
-        bandpassHighHz: 3,          // Low-pass cutoff (Hz); removes high-frequency noise.
-        defaultThreshold: 0.5,      // Threshold used until we have enough samples in the window.
-        minSamplesForThreshold: 20,  // Minimum samples in window before using adaptive threshold instead of default.
-        minProminence: 0.35,        // Minimum (peak − valley) in m/s² to count a step; filters small shake oscillations.
-        valleyBelowMu: true        // If true, require signal to drop below mean before next step (anti-shake).
-      };
-      // Step detection state (reset on Reset / Start)
-      let lastStepTime = 0;              // Timestamp of last accepted step (for min period check).
-      let lastStepDetectTime = null;      // Timestamp of previous sample (for dt in band-pass).
-      let bpHpPrev = 0;                  // Previous high-pass output.
-      let bpLpPrev = 0;                  // Previous low-pass output.
-      let lastMagRaw = null;              // Previous raw magnitude (for high-pass delta).
-      let magBuffer = [];                 // Rolling { t, v } of band-pass output for adaptive threshold (2 s).
-      let magPrev2 = null;                // Band-pass value at sample i-2 (for local max: need v[i-2] < v[i-1] > v[i]).
-      let magPrev1 = null;                // Band-pass value at sample i-1.
-      let minSinceLastStep = Infinity;    // Minimum band-pass value since last step (valley for prominence).
-      let hadValleySinceLastStep = true;  // True after signal drops below mean; false right after a step (anti-shake).
+      // Backend-driven PDR: algorithm lives server-side.
+      let pdrSessionId = null;
+      let pdrSocket = null;
+      let pdrSocketOpen = false;
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -883,22 +820,19 @@
       }
 
       function setFrontCard(panel) {
-        if (!tagTrajectory || !tagVideo || !tagSensors || !stepsCard || !trajectoryCard || !sensorCard || !videoCard) return;
-        const active = panel === 'video' ? 'video' : (panel === 'sensors' ? 'sensors' : 'trajectory');
+        if (!tagTrajectory || !tagVideo || !stepsCard || !trajectoryCard || !sensorCard || !videoCard) return;
+        const active = panel === 'video' ? 'video' : 'trajectory';
         tagTrajectory.classList.toggle('active', active === 'trajectory');
         tagVideo.classList.toggle('active', active === 'video');
-        tagSensors.classList.toggle('active', active === 'sensors');
         tagTrajectory.setAttribute('aria-selected', active === 'trajectory' ? 'true' : 'false');
         tagVideo.setAttribute('aria-selected', active === 'video' ? 'true' : 'false');
-        tagSensors.setAttribute('aria-selected', active === 'sensors' ? 'true' : 'false');
 
         const showTrajectory = active === 'trajectory';
         const showVideo = active === 'video';
-        const showSensors = active === 'sensors';
         stepsCard.style.display = showTrajectory ? '' : 'none';
         trajectoryCard.style.display = showTrajectory ? '' : 'none';
         videoCard.classList.toggle('is-hidden', !showVideo);
-        sensorCard.classList.toggle('is-hidden', !showSensors);
+        sensorCard.classList.add('is-hidden');
         if (showTrajectory && map) {
           setTimeout(function () { map.invalidateSize(); }, 60);
         }
@@ -908,113 +842,90 @@
         // Kept for compatibility with existing start/stop flow after moving to page tabs.
       }
 
-      /**
-       * Step detection from linear acceleration (gravity already removed).
-       * Pipeline: orientation-invariant magnitude → band-pass (0.5–3 Hz) → adaptive threshold T=μ+kσ →
-       * peak detection (local max + prominence + valley-between-steps) → Weinberg step length.
-       * @param {Object} acc - { x, y, z } linear acceleration in m/s² (e.g. from DeviceMotionEvent.acceleration or accG − gravity).
-       * @param {number} [timeMs] - Timestamp in ms (e.g. Date.now()); used for dt and 2s window.
-       */
-      function stepDetect(acc, timeMs) {
-        if (!acc || acc.x == null) return;
-        const now = timeMs != null ? timeMs : Date.now();
-
-        // 1) Orientation-invariant magnitude (same in pocket, hand, or tilted)
-        const mag = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-
-        // 2) Time step for filter (cap to avoid big gaps)
-        const dtSec = lastStepDetectTime != null
-          ? Math.min((now - lastStepDetectTime) / 1000, 0.1)
-          : 0.02;
-        lastStepDetectTime = now;
-
-        // 3) Band-pass: high-pass at bandpassLowHz, then low-pass at bandpassHighHz (one-pole IIR)
-        const tauHp = 1 / (2 * Math.PI * stepConfig.bandpassLowHz);
-        const tauLp = 1 / (2 * Math.PI * stepConfig.bandpassHighHz);
-        const alphaHp = tauHp / (tauHp + dtSec);
-        const alphaLp = Math.exp(-dtSec / tauLp);
-        const lastRaw = lastMagRaw != null ? lastMagRaw : mag;
-        const hpOut = alphaHp * (bpHpPrev + mag - lastRaw);
-        const lpOut = alphaLp * bpLpPrev + (1 - alphaLp) * hpOut;
-        bpHpPrev = hpOut;
-        bpLpPrev = lpOut;
-        lastMagRaw = mag;
-
-        // 4) Rolling buffer for adaptive threshold (drop older than adaptiveWindowMs)
-        magBuffer.push({ t: now, v: lpOut });
-        const cutoff = now - stepConfig.adaptiveWindowMs;
-        while (magBuffer.length > 0 && magBuffer[0].t < cutoff) magBuffer.shift();
-
-        minSinceLastStep = Math.min(minSinceLastStep, lpOut);
-
-        // 5) Adaptive threshold T = μ + k*σ (over last 2 s); floor 0.15 so weak signals can still trigger
-        let threshold = stepConfig.defaultThreshold;
-        let mu = 0;
-        if (magBuffer.length >= stepConfig.minSamplesForThreshold) {
-          const vals = magBuffer.map(function (e) { return e.v; });
-          mu = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
-          const variance = vals.reduce(function (s, v) { return s + (v - mu) * (v - mu); }, 0) / vals.length;
-          const sigma = Math.sqrt(Math.max(0, variance));
-          threshold = Math.max(mu + stepConfig.adaptiveK * sigma, 0.15);
-        }
-        // Mark that we've seen a valley (signal below mean) so next peak can count as step (anti-shake)
-        if (stepConfig.valleyBelowMu && magBuffer.length >= stepConfig.minSamplesForThreshold && lpOut < mu) {
-          hadValleySinceLastStep = true;
-        }
-
-        // 6) Peak check: previous sample (magPrev1) is a local maximum and passes all guards
-        if (magPrev2 != null) {
-          const isLocalMax = magPrev2 < magPrev1 && magPrev1 > lpOut;
-          const aboveThreshold = magPrev1 > threshold;
-          const minPeriodOk = (now - lastStepTime) >= stepConfig.minPeriodMs;
-          const a_max = magPrev1;
-          const a_min = minSinceLastStep;
-          const prominence = a_max - a_min;
-          const minProminenceOk = prominence >= stepConfig.minProminence;
-
-          if (isLocalMax && aboveThreshold && minPeriodOk && minProminenceOk && hadValleySinceLastStep) {
-            const stepLengthM = K_weinberg * Math.pow(Math.max(0.01, prominence), 0.25);
-            stepHistory.push({
-              stepIndex: stepCount + 1,
-              a_max: a_max,
-              a_min: a_min,
-              stepLengthM: stepLengthM,
-              ts: now
-            });
-            totalDistanceM += stepLengthM;
-            stepCount++;
-            lastStepTime = now;
-            minSinceLastStep = Infinity;
-            hadValleySinceLastStep = false;
-          }
-        }
-
-        // 7) Shift history for next sample (must be after peak check so magPrev1 is still previous value)
-        magPrev2 = magPrev1;
-        magPrev1 = lpOut;
+      function getBackendBaseUrl() {
+        if (window.PDR_BACKEND_URL) return String(window.PDR_BACKEND_URL).replace(/\/+$/, '');
+        if (window.location.protocol.startsWith('http')) return window.location.origin.replace(/\/+$/, '');
+        return 'http://127.0.0.1:8000';
       }
 
-      function updateTrajectory() {
-        if (stepCount <= lastStepCountForTrajectory) return;
-        const newSteps = stepCount - lastStepCountForTrajectory;
-        const fallbackHeading = lastOrientation
-          ? (lastOrientation.webkitCompassHeading != null ? lastOrientation.webkitCompassHeading : lastOrientation.alpha)
-          : 0;
-        const headingDeg = (headingFusedDeg != null ? headingFusedDeg : fallbackHeading);
-        trajectory.headingDeg = headingDeg;
-        const rad = (headingDeg * Math.PI) / 180;
-        // Step in heading direction: 0° = North (+y), 90° = East (+x). Turn left → heading decreases → trajectory goes left on map.
-        for (let i = 0; i < newSteps; i++) {
-          const idx = lastStepCountForTrajectory + i;
-          const stepLen = (idx < stepHistory.length && stepHistory[idx]) ? stepHistory[idx].stepLengthM : 0.7;
-          trajectory.x += stepLen * Math.sin(rad);
-          trajectory.y += stepLen * Math.cos(rad);
-          trajectory.path.push({ x: trajectory.x, y: trajectory.y });
+      function toWsUrl(httpBase, path) {
+        const url = new URL(path, httpBase.endsWith('/') ? httpBase : httpBase + '/');
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        return url.toString();
+      }
+
+      async function createPdrSession() {
+        const resp = await fetch(getBackendBaseUrl() + '/api/session', { method: 'POST' });
+        if (!resp.ok) throw new Error('后端会话创建失败：' + resp.status);
+        const data = await resp.json();
+        if (!data || !data.session_id) throw new Error('后端返回了无效会话');
+        return data.session_id;
+      }
+
+      function closePdrSocket() {
+        if (pdrSocket) {
+          pdrSocketOpen = false;
+          pdrSocket.close();
+          pdrSocket = null;
         }
-        lastStepCountForTrajectory = stepCount;
+      }
+
+      function applyBackendPose(pose) {
+        if (!pose || pose.type !== 'pose_update') return;
+        const oldStepCount = stepCount;
+        stepCount = Number(pose.step_count || 0);
+        totalDistanceM = Number(pose.distance_m || 0);
+        headingFusedDeg = pose.heading_deg != null ? Number(pose.heading_deg) : null;
+        trajectory.headingDeg = headingFusedDeg;
+        if (pose.position && Number.isFinite(Number(pose.position.x)) && Number.isFinite(Number(pose.position.y))) {
+          trajectory.x = Number(pose.position.x);
+          trajectory.y = Number(pose.position.y);
+        }
+        if (pose.stepped && stepCount > oldStepCount) {
+          trajectory.path.push({ x: trajectory.x, y: trajectory.y });
+          stepHistory.push({
+            stepIndex: stepCount,
+            stepLengthM: Number(pose.step_length_m || 0),
+            ts: Number(pose.t_ms || Date.now())
+          });
+          lastStepCountForTrajectory = stepCount;
+        }
+        stepsEl.textContent = String(stepCount);
         drawTrajectory();
         updateTrajectoryInfo();
-        if (distanceDisplay) distanceDisplay.textContent = totalDistanceM.toFixed(2);
+      }
+
+      async function connectPdrSocket(sessionId) {
+        return await new Promise(function (resolve, reject) {
+          const wsUrl = toWsUrl(getBackendBaseUrl(), '/ws/pdr/' + encodeURIComponent(sessionId));
+          const socket = new WebSocket(wsUrl);
+          const timeout = window.setTimeout(function () {
+            socket.close();
+            reject(new Error('后端 WebSocket 连接超时'));
+          }, 8000);
+          socket.onopen = function () {
+            pdrSocket = socket;
+            pdrSocketOpen = true;
+            resolve();
+          };
+          socket.onmessage = function (evt) {
+            let msg;
+            try {
+              msg = JSON.parse(evt.data);
+            } catch (e) {
+              return;
+            }
+            if (msg.type === 'pose_update') applyBackendPose(msg);
+          };
+          socket.onerror = function () {
+            reject(new Error('后端 WebSocket 连接失败'));
+          };
+          socket.onclose = function () {
+            pdrSocketOpen = false;
+            if (recording) setMessage('后端连接断开，请停止后重试。', 'error');
+          };
+          socket.addEventListener('open', function () { window.clearTimeout(timeout); }, { once: true });
+        });
       }
 
       function updateTrajectoryHeadingOnly() {
@@ -1027,8 +938,7 @@
       }
 
       function updateTrajectoryInfo() {
-        const h = trajectory.headingDeg != null ? trajectory.headingDeg.toFixed(0) : '—';
-        trajectoryInfo.textContent = '东向: ' + trajectory.x.toFixed(2) + ' m，北向: ' + trajectory.y.toFixed(2) + ' m，航向: ' + h + '°';
+        trajectoryInfo.textContent = '';
         if (distanceDisplay) distanceDisplay.textContent = totalDistanceM.toFixed(2);
       }
 
@@ -1104,9 +1014,7 @@
           setMapOrigin(ll.lat, ll.lng);
           if (dragHeading != null) {
             trajectory.headingDeg = dragHeading;
-            headingStateDeg = dragHeading;
             headingFusedDeg = dragHeading;
-            headingInitialized = true;
             updateUserArrowHeading();
             updateTrajectoryInfo();
           }
@@ -1179,17 +1087,7 @@
         recordBuffer = [];
         stepHistory = [];
         totalDistanceM = 0;
-        lastStepTime = 0;
-        lastStepDetectTime = null;
-        bpHpPrev = 0;
-        bpLpPrev = 0;
-        lastMagRaw = null;
-        magBuffer = [];
-        magPrev2 = null;
-        magPrev1 = null;
-        minSinceLastStep = Infinity;
-        hadValleySinceLastStep = true;
-        resetHeadingFilter();
+        headingFusedDeg = null;
         stepsEl.textContent = '0';
         if (distanceDisplay) distanceDisplay.textContent = '0.00';
         if (viFill) viFill.style.width = '0%';
@@ -1198,7 +1096,10 @@
         if (viValueTop) viValueTop.textContent = '0';
         drawTrajectory();
         updateTrajectoryInfo();
-        setMessage('已重置到初始状态。', '');
+        if (pdrSocket && pdrSocketOpen) {
+          pdrSocket.send(JSON.stringify({ type: 'reset', t_ms: Date.now() }));
+        }
+        setMessage('', '');
       }
 
       function pushSample(motion, orientation) {
@@ -1227,8 +1128,6 @@
         });
       }
 
-      let lastOrientation = null;
-
       function normalizeAngle360(deg) {
         let d = deg % 360;
         if (d < 0) d += 360;
@@ -1240,104 +1139,6 @@
         if (d > 180) d -= 360;
         if (d < -180) d += 360;
         return d;
-      }
-
-      function circularMeanDeg(values) {
-        if (!values.length) return null;
-        let sinSum = 0;
-        let cosSum = 0;
-        values.forEach(function (deg) {
-          const rad = deg * Math.PI / 180;
-          sinSum += Math.sin(rad);
-          cosSum += Math.cos(rad);
-        });
-        return normalizeAngle360(Math.atan2(sinSum, cosSum) * 180 / Math.PI);
-      }
-
-      function resetHeadingFilter() {
-        headingGyroDeg = 0;
-        lastGyroTime = null;
-        headingFusedDeg = null;
-        lastMagHeadingDeg = null;
-        headingStateDeg = 0;
-        headingBiasDegPerSec = 0;
-        headingCov = { p00: 400, p01: 0, p10: 0, p11: 25 };
-        headingInitialized = false;
-        headingInitStartMs = null;
-        initialHeadingSamples = [];
-        driftWarningCount = 0;
-      }
-
-      function initializeHeadingFilter(nowMs, initialHeadingDeg) {
-        const headingDeg = normalizeAngle360(initialHeadingDeg);
-        headingStateDeg = headingDeg;
-        headingGyroDeg = headingDeg;
-        headingFusedDeg = headingDeg;
-        headingBiasDegPerSec = 0;
-        headingCov = { p00: 25, p01: 0, p10: 0, p11: 4 };
-        headingInitialized = true;
-        lastGyroTime = nowMs;
-        lastMagHeadingDeg = headingDeg;
-      }
-
-      function predictHeadingEkf(yawRateDegSec, nowMs) {
-        if (lastGyroTime == null) {
-          lastGyroTime = nowMs;
-          return;
-        }
-        const dt = Math.min((nowMs - lastGyroTime) / 1000, 0.1);
-        lastGyroTime = nowMs;
-        if (!headingInitialized || dt <= 0) return;
-
-        const signedYawRateDegSec = GYRO_ALPHA_SIGN * yawRateDegSec;
-        headingStateDeg = normalizeAngle360(headingStateDeg + (signedYawRateDegSec - headingBiasDegPerSec) * dt);
-        headingGyroDeg = headingStateDeg;
-        headingFusedDeg = headingStateDeg;
-
-        const p00 = headingCov.p00;
-        const p01 = headingCov.p01;
-        const p10 = headingCov.p10;
-        const p11 = headingCov.p11;
-        const qHeading = headingFilterConfig.processNoiseHeadingDeg2PerSec;
-        const qBias = headingFilterConfig.processNoiseBiasDeg2PerSec;
-        const q00 = qHeading * dt + qBias * dt * dt * dt / 3;
-        const q01 = -qBias * dt * dt / 2;
-        const q11 = qBias * dt;
-
-        headingCov.p00 = p00 - dt * p01 - dt * p10 + dt * dt * p11 + q00;
-        headingCov.p01 = p01 - dt * p11 + q01;
-        headingCov.p10 = p10 - dt * p11 + q01;
-        headingCov.p11 = p11 + q11;
-      }
-
-      function updateHeadingEkf(measuredHeadingDeg) {
-        if (!headingInitialized) return 0;
-
-        const magJump = lastMagHeadingDeg != null
-          ? Math.abs(angularDiffDeg(lastMagHeadingDeg, measuredHeadingDeg))
-          : 0;
-        lastMagHeadingDeg = measuredHeadingDeg;
-
-        const innovationDeg = angularDiffDeg(headingStateDeg, measuredHeadingDeg);
-        const measurementNoise = magJump > headingFilterConfig.magJumpThresholdDeg
-          ? headingFilterConfig.measNoiseDisturbedDeg2
-          : headingFilterConfig.measNoiseStableDeg2;
-        const s = headingCov.p00 + measurementNoise;
-        const k0 = headingCov.p00 / s;
-        const k1 = headingCov.p10 / s;
-        const p00 = headingCov.p00;
-        const p01 = headingCov.p01;
-        const p10 = headingCov.p10;
-        const p11 = headingCov.p11;
-
-        headingStateDeg = normalizeAngle360(headingStateDeg + k0 * innovationDeg);
-        headingBiasDegPerSec += k1 * innovationDeg;
-        headingCov.p00 = (1 - k0) * p00;
-        headingCov.p01 = (1 - k0) * p01;
-        headingCov.p10 = p10 - k1 * p00;
-        headingCov.p11 = p11 - k1 * p01;
-        headingFusedDeg = headingStateDeg;
-        return innovationDeg;
       }
 
       function onMotion(e) {
@@ -1354,44 +1155,29 @@
           if (viFillTop) viFillTop.style.width = viLevel.toFixed(0) + '%';
           if (viValueTop) viValueTop.textContent = viLevel.toFixed(0);
           pushPlot(sensorPlots.acc, acc.x, acc.y, acc.z);
-          stepDetect(acc, Date.now());
         }
         const rot = e.rotationRate;
-        const now = Date.now();
-        if (rot && rot.alpha != null && !Number.isNaN(rot.alpha)) {
-          let yawRateDegSec = rot.alpha;
-          const accG = e.accelerationIncludingGravity;
-          if (accG && accG.x != null && accG.y != null && accG.z != null) {
-            // Project gyro onto gravity so yaw integration still works when phone pose changes.
-            const gNorm = Math.sqrt(accG.x * accG.x + accG.y * accG.y + accG.z * accG.z);
-            if (gNorm > 2) {
-              const ux = accG.x / gNorm;
-              const uy = accG.y / gNorm;
-              const uz = accG.z / gNorm;
-              const rotX = rot.gamma != null && !Number.isNaN(rot.gamma) ? rot.gamma : 0;
-              const rotY = rot.beta != null && !Number.isNaN(rot.beta) ? rot.beta : 0;
-              const rotZ = rot.alpha;
-              yawRateDegSec = rotX * ux + rotY * uy + rotZ * uz;
-            }
-          }
-          predictHeadingEkf(yawRateDegSec, now);
+        if (rot) {
           gyroAlpha.textContent = formatNum(rot.alpha);
           gyroBeta.textContent = formatNum(rot.beta);
           gyroGamma.textContent = formatNum(rot.gamma);
           pushPlot(sensorPlots.gyro, rot.alpha, rot.beta, rot.gamma);
         }
-        stepsEl.textContent = String(stepCount);
-        updateTrajectory();
+        if (pdrSocket && pdrSocketOpen) {
+          pdrSocket.send(JSON.stringify({
+            type: 'sensor_frame',
+            t_ms: Date.now(),
+            acc_including_g: e.accelerationIncludingGravity || { x: 0, y: 0, z: 0 },
+            rotation_rate: rot ? { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma } : { alpha: null, beta: null, gamma: null },
+            orientation: lastOrientation || {}
+          }));
+        }
         pushSample(e, lastOrientation);
       }
 
       function onOrientation(e) {
-        const now = Date.now();
-        const webkitHeading = (e.webkitCompassHeading != null && !Number.isNaN(e.webkitCompassHeading))
+        const compassHeading = (e.webkitCompassHeading != null && !Number.isNaN(e.webkitCompassHeading))
           ? normalizeAngle360(e.webkitCompassHeading)
-          : null;
-        const compassHeading = webkitHeading != null
-          ? webkitHeading
           : (e.alpha != null && !Number.isNaN(e.alpha) ? normalizeAngle360(e.alpha) : null);
         lastOrientation = {
           alpha: e.alpha,
@@ -1404,25 +1190,6 @@
         orientBeta.textContent = formatNum(e.beta);
         orientGamma.textContent = formatNum(e.gamma);
         pushPlot(sensorPlots.orient, compassHeading != null ? compassHeading : e.alpha, e.beta, e.gamma);
-        if (compassHeading != null) {
-          if (!headingInitialized) {
-            if (headingInitStartMs == null) headingInitStartMs = now;
-            initialHeadingSamples.push(webkitHeading != null ? webkitHeading : compassHeading);
-            const initWindowDone = (now - headingInitStartMs) >= headingFilterConfig.initWindowMs;
-            if ((initWindowDone || initialHeadingSamples.length >= headingFilterConfig.minInitSamples) && initialHeadingSamples.length > 0) {
-              initializeHeadingFilter(now, circularMeanDeg(initialHeadingSamples));
-            } else {
-              headingFusedDeg = circularMeanDeg(initialHeadingSamples);
-            }
-          }
-          if (headingInitialized) {
-            const diff = Math.abs(updateHeadingEkf(compassHeading));
-            if (diff > DRIFT_THRESHOLD_DEG) {
-              driftWarningCount++;
-              if (driftWarningCount >= DRIFT_WARN_SAMPLES) setMessage('可能发生航向漂移，建议在地标处校准。', 'error');
-            } else driftWarningCount = 0;
-          }
-        }
         updateTrajectoryHeadingOnly();
       }
 
@@ -1472,9 +1239,16 @@
         const ok = await requestPermission();
         if (!ok) return;
 
+        try {
+          pdrSessionId = await createPdrSession();
+          await connectPdrSocket(pdrSessionId);
+        } catch (err) {
+          setMessage('PDR 后端不可用：' + err.message, 'error');
+          return;
+        }
+
         recordedVideoChunks = [];
         recordedVideoBlob = null;
-        btnDownloadVideo.disabled = true;
 
         try {
           mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -1536,17 +1310,7 @@
         trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: null };
         stepHistory = [];
         totalDistanceM = 0;
-        lastStepTime = 0;
-        lastStepDetectTime = null;
-        bpHpPrev = 0;
-        bpLpPrev = 0;
-        lastMagRaw = null;
-        magBuffer = [];
-        magPrev2 = null;
-        magPrev1 = null;
-        minSinceLastStep = Infinity;
-        hadValleySinceLastStep = true;
-        resetHeadingFilter();
+        headingFusedDeg = null;
         if (viFill) viFill.style.width = '0%';
         if (viValue) viValue.textContent = '0';
         if (viFillTop) viFillTop.style.width = '0%';
@@ -1557,23 +1321,23 @@
         statusText.textContent = '记录中…';
         btnStart.disabled = true;
         btnStop.disabled = false;
-        btnDownload.disabled = false;
-        setMessage('正在记录，行走即可计步。', 'success');
+        setMessage('', '');
       }
 
       function stopRecording() {
         recording = false;
         stopListeners();
+        closePdrSocket();
+        pdrSessionId = null;
 
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
           const recorderMime = mediaRecorder.mimeType || 'video/webm';
           mediaRecorder.onstop = function () {
             if (recordedVideoChunks.length > 0) {
               recordedVideoBlob = new Blob(recordedVideoChunks, { type: recorderMime });
-              btnDownloadVideo.disabled = false;
-              setMessage('已停止，可下载 JSON 或视频。', 'success');
+              setMessage('', '');
             } else {
-              setMessage('已停止。没有视频数据（请录制几秒后重试）。', '');
+              setMessage('', '');
             }
             if (mediaStream) {
               mediaStream.getTracks().forEach(function (t) { t.stop(); });
@@ -1601,33 +1365,7 @@
         statusText.textContent = '已停止';
         btnStart.disabled = false;
         btnStop.disabled = true;
-        setMessage('已停止，可以下载记录数据。', '');
-      }
-
-      function downloadData() {
-        const trajectoryForApe = trajectory.path.map(function (p, i) {
-          const sh = i > 0 ? stepHistory[i - 1] : null;
-          return { t: sh ? sh.ts : null, x: p.x, y: p.y };
-        });
-        const meta = {
-          recordedAt: new Date().toISOString(),
-          durationMs: recordBuffer.length ? recordBuffer[recordBuffer.length - 1].t - recordBuffer[0].t : 0,
-          stepCount,
-          sampleCount: recordBuffer.length,
-          totalDistanceM: totalDistanceM,
-          weinbergK: K_weinberg,
-          mapOrigin: { lat: mapOriginLat, lng: mapOriginLng },
-          trajectory: { path: trajectory.path, finalPosition: { x: trajectory.x, y: trajectory.y } },
-          stepHistory: stepHistory,
-          trajectory_for_ape: trajectoryForApe
-        };
-        const blob = new Blob([JSON.stringify({ meta, samples: recordBuffer }, null, 2)], { type: 'application/json' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = '旅客定位记录-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.json';
-        a.click();
-        URL.revokeObjectURL(a.href);
-        setMessage('已开始下载。', 'success');
+        setMessage('', '');
       }
 
       function applyZoom(value) {
@@ -1640,20 +1378,8 @@
         zoomValue.textContent = Math.round(num * 10) / 10 + '×';
       }
 
-      function downloadVideo() {
-        if (!recordedVideoBlob) return;
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(recordedVideoBlob);
-        a.download = '旅客定位视频-' + new Date().toISOString().slice(0, 19).replace(/:/g, '-') + '.webm';
-        a.click();
-        URL.revokeObjectURL(a.href);
-        setMessage('视频开始下载。', 'success');
-      }
-
       btnStart.addEventListener('click', startRecording);
       btnStop.addEventListener('click', stopRecording);
-      btnDownload.addEventListener('click', downloadData);
-      btnDownloadVideo.addEventListener('click', downloadVideo);
       btnResetAll.addEventListener('click', resetAll);
       btnResetTrajectory.addEventListener('click', resetAll);
       btnIndoorCorrection.addEventListener('click', function () {
@@ -1674,7 +1400,6 @@
         applyZoom(zoomSlider.value);
       });
       tagTrajectory.addEventListener('click', function () { setFrontCard('trajectory'); });
-      tagSensors.addEventListener('click', function () { setFrontCard('sensors'); });
       tagVideo.addEventListener('click', function () { setFrontCard('video'); });
 
       window.addEventListener('resize', function () {
