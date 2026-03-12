@@ -902,6 +902,7 @@
       function applyBackendPose(pose) {
         if (!pose || pose.type !== 'pose_update') return;
         const oldStepCount = stepCount;
+        const oldDistanceM = totalDistanceM;
         stepCount = Number(pose.step_count || 0);
         totalDistanceM = Number(pose.distance_m || 0);
         headingFusedDeg = pose.heading_deg != null ? Number(pose.heading_deg) : null;
@@ -910,17 +911,32 @@
           trajectory.x = Number(pose.position.x);
           trajectory.y = Number(pose.position.y);
         }
-        if (pose.stepped && stepCount > oldStepCount) {
-          trajectory.path.push({ x: trajectory.x, y: trajectory.y });
-          stepHistory.push({
-            stepIndex: stepCount,
-            stepLengthM: Number(pose.step_length_m || 0),
-            ts: Number(pose.t_ms || Date.now())
-          });
+
+        // Do not rely only on pose.stepped. On unstable networks, we may miss the
+        // exact "stepped=true" frame while still receiving later frames with larger step_count.
+        const gainedSteps = Math.max(0, stepCount - oldStepCount);
+        if (gainedSteps > 0) {
+          const distanceDelta = Math.max(0, totalDistanceM - oldDistanceM);
+          const fallbackStepLen = gainedSteps > 0 ? (distanceDelta / gainedSteps) : Number(pose.step_length_m || 0);
+          const stepLen = Number.isFinite(fallbackStepLen) ? fallbackStepLen : Number(pose.step_length_m || 0);
+          const ts = Number(pose.t_ms || Date.now());
+          for (let i = 0; i < gainedSteps; i++) {
+            trajectory.path.push({ x: trajectory.x, y: trajectory.y });
+            stepHistory.push({
+              stepIndex: oldStepCount + i + 1,
+              stepLengthM: stepLen,
+              ts: ts
+            });
+          }
           lastStepCountForTrajectory = stepCount;
         }
         stepsEl.textContent = String(stepCount);
-        drawTrajectory();
+        try {
+          drawTrajectory();
+        } catch (err) {
+          // Keep distance/step updates alive even if map rendering fails in bad networks.
+          setMessage('地图渲染暂时异常，数据记录仍在继续。', 'error');
+        }
         updateTrajectoryInfo();
       }
 
