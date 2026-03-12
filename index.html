@@ -636,6 +636,7 @@
       let trajectoryPolyline = null;
       let trajectoryRawPolyline = null;
       let trajectorySegmentLayer = null;
+      let baseTileLayer = null;
       let positionMarker = null;
       let originMarker = null;
       let dragStartLatLng = null;
@@ -643,6 +644,34 @@
       const btnResetTrajectory = document.getElementById('btnResetTrajectory');
       const btnIndoorCorrection = document.getElementById('btnIndoorCorrection');
       const distanceDisplay = document.getElementById('distanceDisplay');
+      const tileProviders = [
+        {
+          name: 'OpenStreetMap',
+          url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+          options: {
+            maxZoom: 20,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          }
+        },
+        {
+          name: 'OpenStreetMap DE',
+          url: 'https://{s}.tile.openstreetmap.de/{z}/{x}/{y}.png',
+          options: {
+            maxZoom: 20,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          }
+        },
+        {
+          name: 'CARTO Light',
+          url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+          options: {
+            subdomains: 'abcd',
+            maxZoom: 20,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; CARTO'
+          }
+        }
+      ];
+      let activeTileProviderIndex = 0;
       let indoorCorrectionEnabled = false;
       const indoorCorrectionConfig = {
         turnThresholdDeg: 30,
@@ -980,9 +1009,7 @@
       function initMap() {
         if (!mapContainer || map !== null) return;
         map = L.map('trajectoryMap', { zoomControl: true }).setView([mapOriginLat, mapOriginLng], 20);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-        }).addTo(map);
+        setBaseTileProvider(0);
         originMarker = L.circleMarker([mapOriginLat, mapOriginLng], {
           radius: 10,
           fillColor: '#34c759',
@@ -1027,6 +1054,24 @@
           setMessage('位置已设置，准备好后点击开始。', 'success');
         });
         useApproxCurrentPosition();
+      }
+
+      function setBaseTileProvider(providerIndex) {
+        if (!map) return;
+        const idx = Math.max(0, Math.min(providerIndex, tileProviders.length - 1));
+        const provider = tileProviders[idx];
+        activeTileProviderIndex = idx;
+
+        if (baseTileLayer) map.removeLayer(baseTileLayer);
+        baseTileLayer = L.tileLayer(provider.url, provider.options);
+        baseTileLayer.addTo(map);
+
+        baseTileLayer.on('tileerror', function () {
+          const nextIndex = activeTileProviderIndex + 1;
+          if (nextIndex >= tileProviders.length) return;
+          setBaseTileProvider(nextIndex);
+          setMessage('当前网络地图加载不稳定，已切换到备用底图。', 'error');
+        });
       }
 
       function updateUserArrowHeading() {
