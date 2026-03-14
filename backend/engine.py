@@ -1,6 +1,8 @@
 import math
+import json
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 
 def clamp(x: float, a: float, b: float) -> float:
@@ -31,6 +33,9 @@ class PdrConfig:
     thr_min: float = 0.10
     k_weinberg: float = 0.45
     gyro_alpha_sign: float = -1.0
+    map_match_max_snap_m: float = 7.0
+    map_match_smooth_alpha: float = 0.35
+    corridor_relpath: str = "data/corridors.json"
 
 
 @dataclass
@@ -60,15 +65,116 @@ class PdrState:
     recording_start_ms: float = 0.0
     turn_mode: bool = False
     turn_mode_until_ms: float = 0.0
+    matched_x: float = 0.0
+    matched_y: float = 0.0
+    matched_confidence: float = 0.0
+    current_edge_id: Optional[str] = None
+    map_match_enabled: bool = False
+    map_match_ready: bool = False
+
+
+@dataclass
+class CorridorEdge:
+    edge_id: str
+    points: List[Tuple[float, float]]
+
+
+class CorridorMatcher:
+    def __init__(self, corridor_file: Path, max_snap_m: float, smooth_alpha: float):
+        self.max_snap_m = max_snap_m
+        self.smooth_alpha = clamp(smooth_alpha, 0.0, 1.0)
+        self.edges: List[CorridorEdge] = []
+        self._load(corridor_file)
+
+    @property
+    def ready(self) -> bool:
+        return len(self.edges) > 0
+
+    def _load(self, corridor_file: Path) -> None:
+        if not corridor_file.exists():
+            return
+        try:
+            payload = json.loads(corridor_file.read_text(encoding="utf-8"))
+            edges = payload.get("edges") or []
+            for idx, e in enumerate(edges):
+                pts_raw = e.get("points") or []
+                pts: List[Tuple[float, float]] = []
+                for p in pts_raw:
+                    if isinstance(p, list) and len(p) >= 2:
+                        x = float(p[0])
+                        y = float(p[1])
+                        if math.isfinite(x) and math.isfinite(y):
+                            pts.append((x, y))
+                if len(pts) >= 2:
+                    edge_id = str(e.get("id") or f"edge_{idx}")
+                    self.edges.append(CorridorEdge(edge_id=edge_id, points=pts))
+        except Exception:
+            self.edges = []
+
+    def _project_point_to_segment(
+        self, px: float, py: float, ax: float, ay: float, bx: float, by: float
+    ) -> Tuple[float, float, float]:
+        vx = bx - ax
+        vy = by - ay
+        vv = vx * vx + vy * vy
+        if vv <= 1e-9:
+            dx = px - ax
+            dy = py - ay
+            return ax, ay, math.sqrt(dx * dx + dy * dy)
+        t = ((px - ax) * vx + (py - ay) * vy) / vv
+        t = clamp(t, 0.0, 1.0)
+        qx = ax + t * vx
+        qy = ay + t * vy
+        dx = px - qx
+        dy = py - qy
+        return qx, qy, math.sqrt(dx * dx + dy * dy)
+
+    def snap(
+        self, x: float, y: float, heading_deg: float, prev_edge_id: Optional[str]
+    ) -> Tuple[float, float, float, Optional[str]]:
+        if not self.ready:
+            return x, y, 0.0, None
+
+        best = None
+        for edge in self.edges:
+            pts = edge.points
+            for i in range(1, len(pts)):
+                ax, ay = pts[i - 1]
+                bx, by = pts[i]
+                qx, qy, dist = self._project_point_to_segment(x, y, ax, ay, bx, by)
+                heading_seg = wrap_deg(math.degrees(math.atan2(bx - ax, by - ay)))
+                heading_err = abs(wrap_deg(heading_deg - heading_seg))
+                heading_err = min(heading_err, 360.0 - heading_err)
+                score = dist + 0.02 * heading_err
+                if prev_edge_id is not None and edge.edge_id != prev_edge_id:
+                    score += 0.8
+                if best is None or score < best[0]:
+                    best = (score, dist, qx, qy, edge.edge_id)
+
+        if best is None:
+            return x, y, 0.0, None
+
+        _, dist, qx, qy, edge_id = best
+        if dist > self.max_snap_m:
+            return x, y, 0.0, None
+        confidence = clamp(1.0 - dist / max(self.max_snap_m, 1e-6), 0.0, 1.0)
+        return qx, qy, confidence, edge_id
 
 
 class PdrEngine:
     def __init__(self, config: Optional[PdrConfig] = None):
         self.cfg = config or PdrConfig()
         self.state = PdrState()
+        corridor_file = Path(__file__).resolve().parents[1] / self.cfg.corridor_relpath
+        self.matcher = CorridorMatcher(
+            corridor_file=corridor_file,
+            max_snap_m=self.cfg.map_match_max_snap_m,
+            smooth_alpha=self.cfg.map_match_smooth_alpha,
+        )
 
     def reset(self, t_ms: float) -> None:
         self.state = PdrState(recording_start_ms=t_ms)
+        self.state.map_match_ready = self.matcher.ready
 
     def _dyn_stats(self, values: list) -> Tuple[float, float]:
         if not values:
@@ -195,6 +301,7 @@ class PdrEngine:
         t_ms = float(frame.get("t_ms") or 0.0)
         if t_ms <= 0:
             t_ms = 0.0
+        self.state.map_match_enabled = bool(frame.get("map_match_enabled"))
         orientation = frame.get("orientation") or {}
         self._update_heading_mag(orientation)
         self._update_heading(frame.get("rotation_rate") or {}, t_ms)
@@ -206,13 +313,48 @@ class PdrEngine:
             self.state.distance_m += self.state.step_length_m
             self.state.step_count += 1
 
+        self.state.map_match_ready = self.matcher.ready
+        if self.state.map_match_enabled and self.matcher.ready:
+            sx, sy, conf, edge_id = self.matcher.snap(
+                x=self.state.x,
+                y=self.state.y,
+                heading_deg=self.state.heading_fused_deg,
+                prev_edge_id=self.state.current_edge_id,
+            )
+            if self.state.matched_confidence <= 1e-6:
+                self.state.matched_x = sx
+                self.state.matched_y = sy
+            else:
+                a = self.cfg.map_match_smooth_alpha
+                self.state.matched_x = (1.0 - a) * self.state.matched_x + a * sx
+                self.state.matched_y = (1.0 - a) * self.state.matched_y + a * sy
+            self.state.matched_confidence = conf
+            self.state.current_edge_id = edge_id
+        else:
+            self.state.matched_x = self.state.x
+            self.state.matched_y = self.state.y
+            self.state.matched_confidence = 0.0
+            self.state.current_edge_id = None
+
+        display_x = self.state.x
+        display_y = self.state.y
+        if self.state.map_match_enabled and self.state.matched_confidence > 0.0:
+            display_x = self.state.matched_x
+            display_y = self.state.matched_y
+
         return {
             "type": "pose_update",
             "t_ms": t_ms,
             "step_count": self.state.step_count,
             "distance_m": self.state.distance_m,
             "heading_deg": self.state.heading_fused_deg,
-            "position": {"x": self.state.x, "y": self.state.y},
+            "position": {"x": display_x, "y": display_y},
+            "raw_position": {"x": self.state.x, "y": self.state.y},
+            "matched_position": {"x": self.state.matched_x, "y": self.state.matched_y},
+            "map_match_enabled": self.state.map_match_enabled,
+            "map_match_ready": self.state.map_match_ready,
+            "map_match_confidence": self.state.matched_confidence,
+            "map_match_edge_id": self.state.current_edge_id,
             "turn_mode": self.state.turn_mode,
             "step_signal": self.state.step_sig,
             "step_length_m": self.state.step_length_m,

@@ -233,19 +233,49 @@
     .trajectory-card {
       overflow: hidden;
     }
-    .trajectory-map-wrap {
+    .trajectory-map-wrap.orienta-map-frame {
       position: relative;
       width: 100%;
       height: 390px;
-      background: var(--bg);
-      border-radius: 8px;
+      background: #0a0a0a;
+      border: 3px solid #1a1a1a;
+      border-radius: 10px;
+      overflow: hidden;
       margin-top: 0.35rem;
     }
     #trajectoryMap {
       width: 100%;
       height: 100%;
-      border-radius: 8px;
+      background: #0a0a0a;
       z-index: 0;
+    }
+    /* OSM dark theme */
+    .orienta-map-frame .leaflet-tile-pane {
+      filter: brightness(0.35) saturate(0.3) contrast(1.25);
+    }
+    .orienta-map-frame .leaflet-control-zoom {
+      background: #1a1a1a !important;
+      border: 1px solid #333 !important;
+      border-radius: 6px;
+    }
+    .orienta-map-frame .leaflet-control-zoom a {
+      color: #e8e8e8 !important;
+      background: transparent !important;
+    }
+    .orienta-map-frame .leaflet-control-zoom a:hover {
+      background: #2a2a2a !important;
+    }
+    .origin-marker-gate {
+      background: transparent;
+      border: none;
+    }
+    .gate-marker-inner {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #4a9eff 0%, #1a5fcf 100%);
+      border: 2.5px solid #ffffff;
+      box-shadow: 0 0 12px rgba(45, 127, 255, 0.9);
     }
     .user-arrow-wrapper {
       background: transparent;
@@ -254,11 +284,15 @@
     .user-arrow-icon {
       width: 0;
       height: 0;
-      border-left: 9px solid transparent;
-      border-right: 9px solid transparent;
-      border-bottom: 18px solid #ff453a;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-bottom: 24px solid #53d36b;
       transform-origin: 50% 66%;
-      filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.5));
+      filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 8px rgba(83, 211, 107, 0.8));
+    }
+    .trajectory-card.recording .user-arrow-icon {
+      border-bottom-color: #ff453a;
+      filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 8px rgba(255, 69, 58, 0.8));
     }
     .trajectory-actions {
       display: flex;
@@ -490,20 +524,17 @@
     </div>
 
     <div id="trajectoryCard" class="card trajectory-card">
-      <div class="trajectory-title-row">
-        <h2>轨迹</h2>
-        <div id="status" class="status tab-status idle">
-          <span class="status-dot"></span>
-          <span id="statusText">就绪</span>
-        </div>
-      </div>
       <p id="mapHint" class="message" style="margin-bottom:0.5rem">先点击用户箭头调整位置，再点击开始</p>
-      <div class="trajectory-map-wrap">
+      <div class="trajectory-map-wrap orienta-map-frame">
         <div id="trajectoryMap"></div>
       </div>
       <div class="trajectory-actions">
         <span id="trajectoryInfo"></span>
         <div class="trajectory-btn-group">
+          <div id="status" class="status tab-status idle">
+            <span class="status-dot"></span>
+            <span id="statusText">就绪</span>
+          </div>
           <button type="button" id="btnIndoorCorrection" class="btn-indoor-correction">室内环境修正: 关</button>
           <button type="button" id="btnResetTrajectory" class="btn-reset-trajectory">重置</button>
         </div>
@@ -688,6 +719,7 @@
       let pdrSessionId = null;
       let pdrSocket = null;
       let pdrSocketOpen = false;
+      let mapMatchNotReadyWarned = false;
 
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
@@ -901,6 +933,10 @@
 
       function applyBackendPose(pose) {
         if (!pose || pose.type !== 'pose_update') return;
+        if (indoorCorrectionEnabled && pose.map_match_ready === false && !mapMatchNotReadyWarned) {
+          setMessage('已开启室内修正，但后端未加载走廊图，当前仅使用PDR轨迹。', 'error');
+          mapMatchNotReadyWarned = true;
+        }
         const oldStepCount = stepCount;
         const oldDistanceM = totalDistanceM;
         stepCount = Number(pose.step_count || 0);
@@ -1024,24 +1060,25 @@
 
       function initMap() {
         if (!mapContainer || map !== null) return;
-        map = L.map('trajectoryMap', { zoomControl: true }).setView([mapOriginLat, mapOriginLng], 20);
+        map = L.map('trajectoryMap', { zoomControl: true, attributionControl: false }).setView([mapOriginLat, mapOriginLng], 20);
         setBaseTileProvider(0);
-        originMarker = L.circleMarker([mapOriginLat, mapOriginLng], {
-          radius: 10,
-          fillColor: '#34c759',
-          color: '#e8e8ec',
-          weight: 2,
-          fillOpacity: 0.9
-        }).addTo(map).bindTooltip('当前位置', { permanent: false, direction: 'top' });
-        trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.9 }).addTo(map);
-        trajectoryRawPolyline = L.polyline([], { color: '#4a9eff', weight: 4, opacity: 0.95 }).addTo(map);
+        originMarker = L.marker([mapOriginLat, mapOriginLng], {
+          icon: L.divIcon({
+            className: 'origin-marker-gate',
+            html: '<div class="gate-marker-inner"></div>',
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+          })
+        }).addTo(map).bindTooltip('登机口', { permanent: false, direction: 'top' });
+        trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 6, opacity: 0.95, dashArray: '10, 8' }).addTo(map);
+        trajectoryRawPolyline = L.polyline([], { color: '#4a9eff', weight: 6, opacity: 0.95, dashArray: '10, 8' }).addTo(map);
         trajectorySegmentLayer = L.layerGroup().addTo(map);
         positionMarker = L.marker([mapOriginLat, mapOriginLng], {
           icon: L.divIcon({
             className: 'user-arrow-wrapper',
             html: '<div class="user-arrow-icon"></div>',
-            iconSize: [20, 20],
-            iconAnchor: [10, 10]
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
           }),
           keyboard: false,
           draggable: true
@@ -1113,8 +1150,9 @@
             const segLatLngs = seg.points.map(function (p) { return metersToLatLng(p.x, p.y); });
             L.polyline(segLatLngs, {
               color: seg.type === 'turn' ? '#ff2d2d' : '#2d7fff',
-              weight: 4,
-              opacity: 0.95
+              weight: 6,
+              opacity: 0.95,
+              dashArray: '10, 8'
             }).addTo(trajectorySegmentLayer);
           });
         } else {
@@ -1139,6 +1177,7 @@
 
       function resetAll() {
         indoorCorrectionEnabled = false;
+        mapMatchNotReadyWarned = false;
         updateIndoorCorrectionButton();
         setMapHintVisible(true);
         stepCount = 0;
@@ -1230,7 +1269,8 @@
             t_ms: Date.now(),
             acc_including_g: e.accelerationIncludingGravity || { x: 0, y: 0, z: 0 },
             rotation_rate: rot ? { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma } : { alpha: null, beta: null, gamma: null },
-            orientation: lastOrientation || {}
+            orientation: lastOrientation || {},
+            map_match_enabled: indoorCorrectionEnabled
           }));
         }
         pushSample(e, lastOrientation);
@@ -1294,6 +1334,7 @@
 
       async function startRecording() {
         indoorCorrectionEnabled = false;
+        mapMatchNotReadyWarned = false;
         updateIndoorCorrectionButton();
         setMapHintVisible(false);
         setMessage('正在请求传感器权限…', '');
@@ -1380,6 +1421,7 @@
         startListeners();
         statusEl.className = 'status recording';
         statusText.textContent = '记录中…';
+        if (trajectoryCard) trajectoryCard.classList.add('recording');
         btnStart.disabled = true;
         btnStop.disabled = false;
         setMessage('', '');
@@ -1424,6 +1466,7 @@
 
         statusEl.className = 'status idle';
         statusText.textContent = '已停止';
+        if (trajectoryCard) trajectoryCard.classList.remove('recording');
         btnStart.disabled = false;
         btnStop.disabled = true;
         setMessage('', '');
@@ -1445,6 +1488,7 @@
       btnResetTrajectory.addEventListener('click', resetAll);
       btnIndoorCorrection.addEventListener('click', function () {
         indoorCorrectionEnabled = !indoorCorrectionEnabled;
+        if (indoorCorrectionEnabled) mapMatchNotReadyWarned = false;
         updateIndoorCorrectionButton();
         drawTrajectory();
       });
