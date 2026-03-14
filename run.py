@@ -4,13 +4,17 @@ import os
 import sys
 
 # Resolve project root (where this run.py lives)
-_root = os.path.dirname(os.path.abspath(__file__))
+_root = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
 os.chdir(_root)
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
 import uvicorn
-from backend.app import app
+try:
+    from backend.app import app
+except ModuleNotFoundError as e:
+    print(f"[run.py] CWD={os.getcwd()}, root={_root}, sys.path={sys.path[:3]}", file=sys.stderr)
+    raise
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

@@ -4,7 +4,7 @@ services:
     runtime: python
     repo: https://github.com/siyaofu3931/PDR_AIRCHINA.git
     branch: main
-    buildCommand: pip install --upgrade pip && pip install fastapi "uvicorn[standard]"
-    startCommand: python run.py
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python3 run.py
     healthCheckPath: /health
     pullRequestPreviewsEnabled: false
