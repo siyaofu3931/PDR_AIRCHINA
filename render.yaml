@@ -4,7 +4,6 @@ services:
     runtime: python
     repo: https://github.com/siyaofu3931/PDR_AIRCHINA.git
     branch: main
-    rootDir: pedestrian_dead_reckoning
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python3 run.py
     healthCheckPath: /health
