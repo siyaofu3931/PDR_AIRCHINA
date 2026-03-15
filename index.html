@@ -677,6 +677,15 @@
       const distanceDisplay = document.getElementById('distanceDisplay');
       const tileProviders = [
         {
+          name: 'Esri World',
+          url: 'https://{s}.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+          options: {
+            subdomains: ['server', 'services'],
+            maxZoom: 19,
+            attribution: '&copy; Esri'
+          }
+        },
+        {
           name: 'GeoQ 智图',
           url: 'https://map.geoq.cn/ArcGIS/rest/services/ChinaOnlineCommunity/MapServer/tile/{z}/{y}/{x}',
           options: {
@@ -711,7 +720,7 @@
         }
       ];
       const TILE_PROVIDER_CHINA = 0;
-      const TILE_PROVIDER_OSM = 1;
+      const TILE_PROVIDER_OSM = 2;
       let activeTileProviderIndex = 0;
       let indoorCorrectionEnabled = false;
       const indoorCorrectionConfig = {
