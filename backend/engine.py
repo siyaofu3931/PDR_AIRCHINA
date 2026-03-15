@@ -24,14 +24,21 @@ def wrap_rad(r: float) -> float:
 
 @dataclass
 class PdrConfig:
-    min_period_ms: float = 250.0
+    # Step detection (aligned with pedestrian_dead_reckoning benchmark)
+    min_period_ms: float = 350.0
     max_period_ms: float = 2000.0
+    adaptive_window_ms: float = 2000.0
+    adaptive_k: float = 0.5
+    bandpass_low_hz: float = 0.5
+    bandpass_high_hz: float = 3.0
+    default_threshold: float = 0.5
+    min_samples_for_threshold: int = 20
+    min_prominence: float = 0.35
+    thr_floor: float = 0.15
+    valley_below_mu: bool = True
+    # Gravity / signal
     gravity_alpha: float = 0.92
-    sig_smooth_alpha: float = 0.84
-    dyn_win: int = 30
-    thr_k: float = 1.6
-    thr_min: float = 0.10
-    k_weinberg: float = 0.45
+    k_weinberg: float = 0.5
     gyro_alpha_sign: float = -1.0
     map_match_max_snap_m: float = 7.0
     map_match_smooth_alpha: float = 0.35
@@ -56,12 +63,6 @@ class PdrState:
     gravity: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     lin: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     step_sig: float = 0.0
-    sig_hist: list = field(default_factory=list)
-    last_sig: float = 0.0
-    rising: bool = False
-    cur_step_max: float = -1e9
-    cur_step_min: float = 1e9
-    last_step_feature: float = 0.0
     recording_start_ms: float = 0.0
     turn_mode: bool = False
     turn_mode_until_ms: float = 0.0
@@ -71,6 +72,16 @@ class PdrState:
     current_edge_id: Optional[str] = None
     map_match_enabled: bool = False
     map_match_ready: bool = False
+    # Benchmark-style step detection (band-pass + time-based threshold + prominence)
+    last_step_detect_ms: Optional[float] = None
+    bp_hp_prev: float = 0.0
+    bp_lp_prev: float = 0.0
+    last_mag_raw: Optional[float] = None
+    mag_buffer: list = field(default_factory=list)  # [(t_ms, v), ...]
+    mag_prev2: Optional[float] = None
+    mag_prev1: Optional[float] = None
+    min_since_last_step: float = 1e9
+    had_valley_since_last_step: bool = True
 
 
 @dataclass
@@ -176,21 +187,6 @@ class PdrEngine:
         self.state = PdrState(recording_start_ms=t_ms)
         self.state.map_match_ready = self.matcher.ready
 
-    def _dyn_stats(self, values: list) -> Tuple[float, float]:
-        if not values:
-            return 0.0, 0.0
-        mean = sum(values) / len(values)
-        if len(values) < 2:
-            return mean, 0.0
-        var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
-        return mean, math.sqrt(var)
-
-    def _cadence_hz(self) -> float:
-        if len(self.state.step_intervals) < 2:
-            return float("nan")
-        avg = sum(self.state.step_intervals) / len(self.state.step_intervals)
-        return 1000.0 / avg if avg > 1e-6 else float("nan")
-
     def _update_heading_mag(self, orientation: Dict) -> None:
         webkit = orientation.get("webkitCompassHeading")
         alpha = orientation.get("alpha")
@@ -242,7 +238,12 @@ class PdrEngine:
             self.state.heading_gyro_rad = wrap_rad(self.state.heading_gyro_rad + base_gain * turn_boost * innov)
         self.state.heading_fused_deg = wrap_deg(math.degrees(self.state.heading_gyro_rad))
 
-    def _step_detect(self, acc_g: Dict, t_ms: float) -> bool:
+    def _step_detect(self, frame: Dict, t_ms: float) -> bool:
+        """Step detection aligned with pedestrian_dead_reckoning benchmark: orientation-invariant
+        magnitude, band-pass 0.5-3 Hz, time-based adaptive threshold (mean + k*sigma), prominence + valley.
+        Uses acc_linear when provided by client (device gravity removal); else acc_including_g with backend gravity removal.
+        """
+        acc_g = frame.get("acc_including_g") or {}
         ax = float(acc_g.get("x", 0.0))
         ay = float(acc_g.get("y", 0.0))
         az = float(acc_g.get("z", 0.0))
@@ -252,50 +253,100 @@ class PdrEngine:
         gy = a * gy + (1 - a) * ay
         gz = a * gz + (1 - a) * az
         self.state.gravity = (gx, gy, gz)
-        norm = math.sqrt(gx * gx + gy * gy + gz * gz) or 1.0
-        ux, uy, uz = gx / norm, gy / norm, gz / norm
         lx, ly, lz = ax - gx, ay - gy, az - gz
         self.state.lin = (lx, ly, lz)
 
-        vertical = -(lx * ux + ly * uy + lz * uz)
-        sig_raw = abs(vertical)
-        s = self.cfg.sig_smooth_alpha
-        self.state.step_sig = s * self.state.step_sig + (1 - s) * sig_raw
-        self.state.cur_step_max = max(self.state.cur_step_max, self.state.step_sig)
-        self.state.cur_step_min = min(self.state.cur_step_min, self.state.step_sig)
+        # 1) Orientation-invariant magnitude: prefer linear acc from device when available (ALGORITHM_COMPARISON §6)
+        acc_linear = frame.get("acc_linear")
+        if acc_linear and isinstance(acc_linear, dict):
+            lax = acc_linear.get("x"), acc_linear.get("y"), acc_linear.get("z")
+            if all(isinstance(v, (int, float)) and math.isfinite(v) for v in lax):
+                mag = math.sqrt(
+                    float(lax[0]) ** 2 + float(lax[1]) ** 2 + float(lax[2]) ** 2
+                )
+            else:
+                mag = math.sqrt(lx * lx + ly * ly + lz * lz)
+        else:
+            mag = math.sqrt(lx * lx + ly * ly + lz * lz)
 
-        self.state.sig_hist.append(self.state.step_sig)
-        if len(self.state.sig_hist) > self.cfg.dyn_win:
-            self.state.sig_hist.pop(0)
-        mean, std = self._dyn_stats(self.state.sig_hist)
-        warmup = (t_ms - self.state.recording_start_ms) < 2500.0
-        thr_k = self.cfg.thr_k * 0.8 if warmup else self.cfg.thr_k
-        min_period = max(180.0, self.cfg.min_period_ms - 40.0) if warmup else self.cfg.min_period_ms
-        threshold = max(self.cfg.thr_min, mean + thr_k * std)
-        is_peak = self.state.rising and (self.state.last_sig > self.state.step_sig) and (self.state.last_sig > threshold)
-        dt = t_ms - self.state.last_step_time_ms
-        is_first = self.state.last_step_time_ms == 0.0
-        valid_interval = is_first or (min_period <= dt <= self.cfg.max_period_ms)
+        # 2) Time step for filter (cap to avoid big gaps from network jitter)
+        if self.state.last_step_detect_ms is not None:
+            dt_sec = min((t_ms - self.state.last_step_detect_ms) / 1000.0, 0.1)
+        else:
+            dt_sec = 0.02
+        self.state.last_step_detect_ms = t_ms
 
-        self.state.rising = self.state.step_sig > self.state.last_sig
-        self.state.last_sig = self.state.step_sig
-        if not (is_peak and valid_interval):
-            return False
+        # 3) Band-pass: high-pass at bandpass_low_hz, then low-pass at bandpass_high_hz
+        tau_hp = 1.0 / (2.0 * math.pi * self.cfg.bandpass_low_hz)
+        tau_lp = 1.0 / (2.0 * math.pi * self.cfg.bandpass_high_hz)
+        alpha_hp = tau_hp / (tau_hp + dt_sec)
+        alpha_lp = math.exp(-dt_sec / tau_lp)
+        last_raw = self.state.last_mag_raw if self.state.last_mag_raw is not None else mag
+        hp_out = alpha_hp * (self.state.bp_hp_prev + mag - last_raw)
+        lp_out = alpha_lp * self.state.bp_lp_prev + (1.0 - alpha_lp) * hp_out
+        self.state.bp_hp_prev = hp_out
+        self.state.bp_lp_prev = lp_out
+        self.state.last_mag_raw = mag
+        self.state.step_sig = lp_out
 
-        if not is_first:
-            self.state.step_intervals.append(dt)
-            if len(self.state.step_intervals) > 8:
-                self.state.step_intervals.pop(0)
-        self.state.last_step_time_ms = t_ms
-        delta = max(0.0, self.state.cur_step_max - self.state.cur_step_min)
-        self.state.last_step_feature = pow(max(delta, 1e-6), 0.25)
-        cadence = self._cadence_hz()
-        cadence_factor = 1.0 if math.isnan(cadence) else clamp(0.85 + 0.18 * (cadence - 1.6), 0.75, 1.15)
-        raw_step_len = self.cfg.k_weinberg * self.state.last_step_feature * cadence_factor + 0.25
-        self.state.step_length_m = clamp(raw_step_len, 0.35, 1.2) if math.isfinite(raw_step_len) else 0.7
-        self.state.cur_step_max = -1e9
-        self.state.cur_step_min = 1e9
-        return True
+        # 4) Time-based rolling buffer for adaptive threshold
+        self.state.mag_buffer.append((t_ms, lp_out))
+        cutoff = t_ms - self.cfg.adaptive_window_ms
+        while self.state.mag_buffer and self.state.mag_buffer[0][0] < cutoff:
+            self.state.mag_buffer.pop(0)
+
+        self.state.min_since_last_step = min(self.state.min_since_last_step, lp_out)
+
+        # 5) Adaptive threshold T = mu + k*sigma
+        threshold = self.cfg.default_threshold
+        mu = 0.0
+        if len(self.state.mag_buffer) >= self.cfg.min_samples_for_threshold:
+            vals = [e[1] for e in self.state.mag_buffer]
+            mu = sum(vals) / len(vals)
+            variance = sum((v - mu) ** 2 for v in vals) / len(vals)
+            sigma = math.sqrt(max(0.0, variance))
+            threshold = max(mu + self.cfg.adaptive_k * sigma, self.cfg.thr_floor)
+        if self.cfg.valley_below_mu and len(self.state.mag_buffer) >= self.cfg.min_samples_for_threshold and lp_out < mu:
+            self.state.had_valley_since_last_step = True
+
+        # 6) Peak check: mag_prev1 is local maximum, passes prominence and valley guard
+        stepped = False
+        if self.state.mag_prev2 is not None:
+            is_local_max = self.state.mag_prev2 < self.state.mag_prev1 and self.state.mag_prev1 > lp_out
+            above_threshold = self.state.mag_prev1 > threshold
+            min_period_ok = (t_ms - self.state.last_step_time_ms) >= self.cfg.min_period_ms
+            a_max = self.state.mag_prev1
+            a_min = self.state.min_since_last_step
+            prominence = a_max - a_min
+            min_prominence_ok = prominence >= self.cfg.min_prominence
+            is_first = self.state.last_step_time_ms == 0.0
+            dt_step = t_ms - self.state.last_step_time_ms
+            max_interval_ms = max(5000.0, self.cfg.max_period_ms)
+            valid_interval = is_first or (self.cfg.min_period_ms <= dt_step <= max_interval_ms)
+
+            if (
+                is_local_max
+                and above_threshold
+                and min_period_ok
+                and min_prominence_ok
+                and self.state.had_valley_since_last_step
+                and valid_interval
+            ):
+                step_len = self.cfg.k_weinberg * math.pow(max(0.01, prominence), 0.25)
+                self.state.step_length_m = clamp(step_len, 0.35, 1.2)
+                if not is_first:
+                    self.state.step_intervals.append(dt_step)
+                    if len(self.state.step_intervals) > 8:
+                        self.state.step_intervals.pop(0)
+                self.state.last_step_time_ms = t_ms
+                self.state.min_since_last_step = 1e9
+                self.state.had_valley_since_last_step = False
+                stepped = True
+
+        # 7) Shift history for next sample
+        self.state.mag_prev2 = self.state.mag_prev1
+        self.state.mag_prev1 = lp_out
+        return stepped
 
     def process_frame(self, frame: Dict) -> Dict:
         t_ms = float(frame.get("t_ms") or 0.0)
@@ -305,7 +356,7 @@ class PdrEngine:
         orientation = frame.get("orientation") or {}
         self._update_heading_mag(orientation)
         self._update_heading(frame.get("rotation_rate") or {}, t_ms)
-        stepped = self._step_detect(frame.get("acc_including_g") or {}, t_ms)
+        stepped = self._step_detect(frame, t_ms)
         if stepped:
             h = math.radians(self.state.heading_fused_deg)
             self.state.x += self.state.step_length_m * math.sin(h)

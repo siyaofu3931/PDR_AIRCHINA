@@ -746,6 +746,9 @@
       let pdrSessionId = null;
       let pdrSocket = null;
       let pdrSocketOpen = false;
+      let pdrReconnectScheduled = false;
+      let lastPoseTimeMs = 0;
+      let pdrWatchdogId = null;
       let mapMatchNotReadyWarned = false;
 
       function formatNum(n) {
@@ -960,17 +963,26 @@
 
       function applyBackendPose(pose) {
         if (!pose || pose.type !== 'pose_update') return;
+        lastPoseTimeMs = Date.now();
         if (indoorCorrectionEnabled && pose.map_match_ready === false && !mapMatchNotReadyWarned) {
           setMessage('已开启室内修正，但后端未加载走廊图，当前仅使用PDR轨迹。', 'error');
           mapMatchNotReadyWarned = true;
         }
         const oldStepCount = stepCount;
         const oldDistanceM = totalDistanceM;
-        stepCount = Number(pose.step_count || 0);
-        totalDistanceM = Number(pose.distance_m || 0);
+        const incomingStepCount = Number(pose.step_count || 0);
+        const incomingDistanceM = Number(pose.distance_m || 0);
+        const backendReset = incomingStepCount < stepCount;
+        if (backendReset) {
+          setMessage('后端连接已恢复，步数未同步。', '');
+          window.setTimeout(function () { setMessage('', ''); }, 3000);
+        } else {
+          stepCount = incomingStepCount;
+          totalDistanceM = incomingDistanceM;
+        }
         headingFusedDeg = pose.heading_deg != null ? Number(pose.heading_deg) : null;
         trajectory.headingDeg = headingFusedDeg;
-        if (pose.position && Number.isFinite(Number(pose.position.x)) && Number.isFinite(Number(pose.position.y))) {
+        if (!backendReset && pose.position && Number.isFinite(Number(pose.position.x)) && Number.isFinite(Number(pose.position.y))) {
           trajectory.x = Number(pose.position.x);
           trajectory.y = Number(pose.position.y);
         }
@@ -1029,8 +1041,23 @@
             reject(new Error('后端 WebSocket 连接失败'));
           };
           socket.onclose = function () {
+            pdrSocket = null;
             pdrSocketOpen = false;
-            if (recording) setMessage('后端连接断开，请停止后重试。', 'error');
+            if (recording && pdrSessionId && !pdrReconnectScheduled) {
+              pdrReconnectScheduled = true;
+              setMessage('步态连接断开，正在重连…', 'error');
+              window.setTimeout(function () {
+                if (!recording || !pdrSessionId) { pdrReconnectScheduled = false; return; }
+                connectPdrSocket(pdrSessionId).then(function () {
+                  pdrReconnectScheduled = false;
+                  setMessage('已重新连接。', 'success');
+                  window.setTimeout(function () { setMessage('', ''); }, 2500);
+                }).catch(function () {
+                  pdrReconnectScheduled = false;
+                  setMessage('重连失败，请保持本页在前台或停止后重试。', 'error');
+                });
+              }, 2500);
+            }
           };
           socket.addEventListener('open', function () { window.clearTimeout(timeout); }, { once: true });
         });
@@ -1313,14 +1340,18 @@
           pushPlot(sensorPlots.gyro, rot.alpha, rot.beta, rot.gamma);
         }
         if (pdrSocket && pdrSocketOpen) {
-          pdrSocket.send(JSON.stringify({
+          const payload = {
             type: 'sensor_frame',
             t_ms: Date.now(),
             acc_including_g: e.accelerationIncludingGravity || { x: 0, y: 0, z: 0 },
             rotation_rate: rot ? { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma } : { alpha: null, beta: null, gamma: null },
             orientation: lastOrientation || {},
             map_match_enabled: indoorCorrectionEnabled
-          }));
+          };
+          if (acc && Number.isFinite(acc.x) && Number.isFinite(acc.y) && Number.isFinite(acc.z)) {
+            payload.acc_linear = { x: acc.x, y: acc.y, z: acc.z };
+          }
+          pdrSocket.send(JSON.stringify(payload));
         }
         pushSample(e, lastOrientation);
       }
@@ -1468,6 +1499,22 @@
         if (viValueTop) viValueTop.textContent = '0';
         recording = true;
         startListeners();
+        lastPoseTimeMs = 0;
+        if (pdrWatchdogId) window.clearInterval(pdrWatchdogId);
+        pdrWatchdogId = window.setInterval(function () {
+          if (!recording || !pdrSessionId || lastPoseTimeMs === 0 || pdrReconnectScheduled) return;
+          if (Date.now() - lastPoseTimeMs < 5000) return;
+          pdrReconnectScheduled = true;
+          setMessage('步态数据超时，正在重连…', 'error');
+          connectPdrSocket(pdrSessionId).then(function () {
+            pdrReconnectScheduled = false;
+            setMessage('已重新连接。', 'success');
+            window.setTimeout(function () { setMessage('', ''); }, 2500);
+          }).catch(function () {
+            pdrReconnectScheduled = false;
+            setMessage('重连失败。', 'error');
+          });
+        }, 4000);
         statusEl.className = 'status recording';
         statusText.textContent = '记录中…';
         if (trajectoryCard) trajectoryCard.classList.add('recording');
@@ -1481,6 +1528,9 @@
         stopListeners();
         closePdrSocket();
         pdrSessionId = null;
+        if (pdrWatchdogId) { window.clearInterval(pdrWatchdogId); pdrWatchdogId = null; }
+        pdrReconnectScheduled = false;
+        lastPoseTimeMs = 0;
 
         if (mediaRecorder && mediaRecorder.state !== 'inactive') {
           const recorderMime = mediaRecorder.mimeType || 'video/webm';
