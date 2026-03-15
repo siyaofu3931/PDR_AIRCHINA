@@ -105,6 +105,18 @@ See **Option 1** (GitHub Pages) or **Option 3** (Netlify, Vercel, etc.) above.
 
 On Android, Chrome may allow sensor access over HTTP in some cases; prefer HTTPS for reliable behavior.
 
+## Show trajectory in Orienta back office
+
+When using the app with **orienta_v2_step2** (e.g. deployed at `orienta-v2-step2.onrender.com`), you can stream the current PDR trajectory to the back office map so operators see the passenger’s path in real time.
+
+1. **Use a passenger ID** that exists in the back office (e.g. `P8`). Add it to the URL:  
+   `https://terminal-tracer.onrender.com/?pid=P8`
+2. On **terminal-tracer.onrender.com**, the back office URL is defaulted to `https://orienta-v2-step2.onrender.com`. For other hosts, pass it explicitly:  
+   `?orienta_ws=https://orienta-v2-step2.onrender.com&tenant=airchina&pid=P8`
+3. Open the back office, select the same airport (e.g. PEK) and the same passenger (P8). Tap **Start** on the PDR app; the hint “轨迹将同步至后台地图” confirms sync is on. The trajectory will appear and update on the back office map.
+
+**Requirement:** The page must be loaded over **HTTPS** so the device can provide IMU data (and thus PDR trajectory).
+
 ## File layout
 
 - `index.html` — Single-page app: PDR (Weinberg step length, gyro+mag heading fusion), drift warning, landmark calibration, behavior tag, JSON download with trajectory for APE/RPE.

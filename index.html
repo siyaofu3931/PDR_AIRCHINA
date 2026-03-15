@@ -525,6 +525,7 @@
 
     <div id="trajectoryCard" class="card trajectory-card">
       <p id="mapHint" class="message" style="margin-bottom:0.5rem">先点击用户箭头调整位置，再点击开始</p>
+      <p id="orientaSyncHint" class="message" style="margin-bottom:0.5rem;display:none;font-size:0.9em;color:#666">轨迹将同步至后台地图</p>
       <div class="trajectory-map-wrap orienta-map-frame">
         <div id="trajectoryMap"></div>
       </div>
@@ -747,6 +748,29 @@
       let pdrWatchdogId = null;
       let mapMatchNotReadyWarned = false;
 
+      // Sync trajectory to orienta_v2_step2 back office (when URL has orienta params or default for terminal-tracer)
+      let orientaWs = null;
+      let orientaWsOpen = false;
+      let orientaPushIntervalId = null;
+      let lastOrientaPushMs = 0;
+      var ORIENTA_PUSH_INTERVAL_MS = 800;
+      var ORIENTA_PUSH_PERIODIC_MS = 1200;
+
+      function getOrientaParams() {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var pid = params.get('pid') || params.get('pax') || params.get('passengerId');
+          if (!pid) return null;
+          var base = params.get('orienta_ws') || params.get('orientaWs');
+          if (!base && typeof window !== 'undefined' && window.location.hostname === 'terminal-tracer.onrender.com') {
+            base = 'https://orienta-v2-step2.onrender.com';
+          }
+          var tenant = params.get('tenant') || params.get('tenantId') || 'airchina';
+          if (base) return { orientaWsBase: base.replace(/\/+$/, ''), tenantId: tenant, passengerId: pid };
+        } catch (e) {}
+        return null;
+      }
+
       function formatNum(n) {
         if (n == null || Number.isNaN(n)) return '—';
         return n.toFixed(2);
@@ -957,6 +981,44 @@
         }
       }
 
+      function connectOrientaWs() {
+        var params = getOrientaParams();
+        if (!params) return;
+        var hintEl = document.getElementById('orientaSyncHint');
+        if (hintEl) hintEl.style.display = 'block';
+        var base = params.orientaWsBase.replace(/\/+$/, '');
+        var wsUrl = (base.indexOf('https') === 0 ? base.replace(/^https/, 'wss') : base.replace(/^http/, 'ws')) + '/ws';
+        try {
+          var socket = new WebSocket(wsUrl);
+          socket.onopen = function () {
+            orientaWs = socket;
+            orientaWsOpen = true;
+            socket.send(JSON.stringify({ type: 'hello', role: 'pax', tenantId: params.tenantId, passengerId: params.passengerId }));
+            lastOrientaPushMs = 0;
+            setTimeout(function () { pushTrajectoryToOrienta(false); }, 400);
+            if (orientaPushIntervalId) window.clearInterval(orientaPushIntervalId);
+            orientaPushIntervalId = window.setInterval(function () {
+              if (orientaWsOpen && recording) pushTrajectoryToOrienta(true);
+            }, ORIENTA_PUSH_PERIODIC_MS);
+          };
+          socket.onclose = function () {
+            orientaWsOpen = false;
+            orientaWs = null;
+            if (orientaPushIntervalId) { window.clearInterval(orientaPushIntervalId); orientaPushIntervalId = null; }
+          };
+          socket.onerror = function () {}
+        } catch (e) {}
+      }
+
+      function closeOrientaWs() {
+        if (orientaPushIntervalId) { window.clearInterval(orientaPushIntervalId); orientaPushIntervalId = null; }
+        if (orientaWs) {
+          try { orientaWs.close(); } catch (err) {}
+          orientaWs = null;
+          orientaWsOpen = false;
+        }
+      }
+
       function applyBackendPose(pose) {
         if (!pose || pose.type !== 'pose_update') return;
         lastPoseTimeMs = Date.now();
@@ -1013,6 +1075,7 @@
           setMessage('地图渲染暂时异常，数据记录仍在继续。', 'error');
         }
         updateTrajectoryInfo();
+        pushTrajectoryToOrienta(false);
       }
 
       async function connectPdrSocket(sessionId) {
@@ -1081,6 +1144,20 @@
         const lat = mapOriginLat + (yM / METERS_PER_DEG_LAT);
         const lng = mapOriginLng + (xM / (METERS_PER_DEG_LAT * Math.cos(mapOriginLat * Math.PI / 180)));
         return [lat, lng];
+      }
+
+      function pushTrajectoryToOrienta(forcePeriodic) {
+        if (!orientaWsOpen || !orientaWs || orientaWs.readyState !== WebSocket.OPEN) return;
+        var now = Date.now();
+        if (!forcePeriodic && (now - lastOrientaPushMs < ORIENTA_PUSH_INTERVAL_MS)) return;
+        lastOrientaPushMs = now;
+        var path = (trajectory.path && trajectory.path.length) ? trajectory.path.map(function (p) {
+          var ll = metersToLatLng(p.x, p.y);
+          return { lat: ll[0], lng: ll[1] };
+        }) : [];
+        var cur = metersToLatLng(trajectory.x, trajectory.y);
+        var position = { lat: cur[0], lng: cur[1] };
+        orientaWs.send(JSON.stringify({ type: 'pax_trajectory', path: path, position: position }));
       }
 
       function headingFromLatLng(a, b) {
@@ -1401,6 +1478,8 @@
           return;
         }
 
+        connectOrientaWs();
+
         try {
           mediaStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: { ideal: 'environment' } },
@@ -1483,6 +1562,7 @@
         recording = false;
         stopListeners();
         closePdrSocket();
+        closeOrientaWs();
         pdrSessionId = null;
         if (pdrWatchdogId) { window.clearInterval(pdrWatchdogId); pdrWatchdogId = null; }
         pdrReconnectScheduled = false;
