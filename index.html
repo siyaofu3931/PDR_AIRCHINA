@@ -677,6 +677,14 @@
       const distanceDisplay = document.getElementById('distanceDisplay');
       const tileProviders = [
         {
+          name: 'OSM (代理)',
+          url: '/api/tiles/{z}/{x}/{y}',
+          options: {
+            maxZoom: 20,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          }
+        },
+        {
           name: 'Esri World',
           url: 'https://{s}.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
           options: {
@@ -720,7 +728,7 @@
         }
       ];
       const TILE_PROVIDER_CHINA = 0;
-      const TILE_PROVIDER_OSM = 2;
+      const TILE_PROVIDER_OSM = 3;
       let activeTileProviderIndex = 0;
       let indoorCorrectionEnabled = false;
       const indoorCorrectionConfig = {

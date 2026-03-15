@@ -1,14 +1,22 @@
 import json
+import random
 import time
 import uuid
 from pathlib import Path
 from typing import Dict
 
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from .engine import PdrEngine
+
+TILE_SOURCES = [
+    "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "https://b.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "https://c.tile.openstreetmap.org/{z}/{x}/{y}.png",
+]
 
 
 app = FastAPI(title="PDR Backend Engine", version="1.0.0")
@@ -34,6 +42,26 @@ def health() -> Dict:
 @app.get("/")
 def serve_index() -> FileResponse:
     return FileResponse(frontend_dir / "index.html")
+
+
+@app.get("/api/tiles/{z:int}/{x:int}/{y:int}")
+async def proxy_tile(z: int, x: int, y: int) -> Response:
+    """Proxy map tiles for users in China where OSM is blocked."""
+    url = random.choice(TILE_SOURCES).format(z=z, x=x, y=y)
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            headers={"User-Agent": "PDR-AirChina/1.0 (map-tile-proxy)"},
+        ) as client:
+            r = await client.get(url)
+            r.raise_for_status()
+            return Response(
+                content=r.content,
+                media_type="image/png",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+    except Exception:
+        return Response(status_code=502)
 
 
 @app.post("/api/session")
