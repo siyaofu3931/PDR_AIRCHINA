@@ -641,12 +641,8 @@
 
       let recording = false;
       let mediaStream = null;
-      let mediaRecorder = null;
-      let recordedVideoChunks = [];
-      let recordedVideoBlob = null;
       let videoTrack = null;
       let zoomCap = null;
-      let recordBuffer = [];
       let stepCount = 0;
       let lastStepCountForTrajectory = 0;
       let viLevel = 0;
@@ -974,17 +970,21 @@
         const incomingDistanceM = Number(pose.distance_m || 0);
         const backendReset = incomingStepCount < stepCount;
         if (backendReset) {
-          setMessage('后端连接已恢复，步数未同步。', '');
+          setMessage('连接已恢复，步数已从后端重新同步。', '');
           window.setTimeout(function () { setMessage('', ''); }, 3000);
-        } else {
-          stepCount = incomingStepCount;
-          totalDistanceM = incomingDistanceM;
         }
+        stepCount = incomingStepCount;
+        totalDistanceM = incomingDistanceM;
         headingFusedDeg = pose.heading_deg != null ? Number(pose.heading_deg) : null;
         trajectory.headingDeg = headingFusedDeg;
-        if (!backendReset && pose.position && Number.isFinite(Number(pose.position.x)) && Number.isFinite(Number(pose.position.y))) {
+        if (pose.position && Number.isFinite(Number(pose.position.x)) && Number.isFinite(Number(pose.position.y))) {
           trajectory.x = Number(pose.position.x);
           trajectory.y = Number(pose.position.y);
+        }
+        if (backendReset) {
+          trajectory.path = [{ x: 0, y: 0 }, { x: trajectory.x, y: trajectory.y }];
+          stepHistory = [];
+          lastStepCountForTrajectory = stepCount;
         }
 
         // Do not rely only on pose.stepped. On unstable networks, we may miss the
@@ -1260,7 +1260,6 @@
         lastStepCountForTrajectory = 0;
         viLevel = 0;
         trajectory = { path: [{ x: 0, y: 0 }], x: 0, y: 0, headingDeg: trajectory.headingDeg };
-        recordBuffer = [];
         stepHistory = [];
         totalDistanceM = 0;
         headingFusedDeg = null;
@@ -1276,32 +1275,6 @@
           pdrSocket.send(JSON.stringify({ type: 'reset', t_ms: Date.now() }));
         }
         setMessage('', '');
-      }
-
-      function pushSample(motion, orientation) {
-        if (!recording) return;
-        const t = performance.now();
-        const ts = new Date().toISOString();
-        const acc = motion.acceleration || motion.accelerationIncludingGravity;
-        const accG = motion.accelerationIncludingGravity;
-        const rot = motion.rotationRate || {};
-        recordBuffer.push({
-          ts,
-          t,
-          acceleration: acc ? { x: acc.x, y: acc.y, z: acc.z } : null,
-          accelerationIncludingGravity: accG ? { x: accG.x, y: accG.y, z: accG.z } : null,
-          rotationRate: { alpha: rot.alpha, beta: rot.beta, gamma: rot.gamma },
-          orientation: orientation ? {
-            alpha: orientation.alpha,
-            beta: orientation.beta,
-            gamma: orientation.gamma,
-            absolute: orientation.absolute,
-            webkitCompassHeading: orientation.webkitCompassHeading
-          } : null,
-          steps: stepCount,
-          position: { x: trajectory.x, y: trajectory.y },
-          heading_fused: headingFusedDeg
-        });
       }
 
       function normalizeAngle360(deg) {
@@ -1353,7 +1326,6 @@
           }
           pdrSocket.send(JSON.stringify(payload));
         }
-        pushSample(e, lastOrientation);
       }
 
       function onOrientation(e) {
@@ -1429,9 +1401,6 @@
           return;
         }
 
-        recordedVideoChunks = [];
-        recordedVideoBlob = null;
-
         try {
           mediaStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: { ideal: 'environment' } },
@@ -1465,18 +1434,6 @@
             videoZoomWrap.classList.remove('visible');
           }
           updateStageHeight();
-
-          const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-            ? 'video/webm;codecs=vp9'
-            : MediaRecorder.isTypeSupported('video/webm')
-              ? 'video/webm'
-              : '';
-          const options = mimeType ? { mimeType } : {};
-          mediaRecorder = new MediaRecorder(mediaStream, options);
-          mediaRecorder.ondataavailable = function (e) {
-            if (e.data && e.data.size > 0) recordedVideoChunks.push(e.data);
-          };
-          mediaRecorder.start(250);
         } catch (err) {
           setMessage('相机不可用：' + err.message + '。仍会继续记录 IMU。', 'error');
           if (mediaStream) {
@@ -1485,7 +1442,6 @@
           }
         }
 
-        recordBuffer = [];
         stepCount = 0;
         lastStepCountForTrajectory = 0;
         viLevel = 0;
@@ -1532,32 +1488,13 @@
         pdrReconnectScheduled = false;
         lastPoseTimeMs = 0;
 
-        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-          const recorderMime = mediaRecorder.mimeType || 'video/webm';
-          mediaRecorder.onstop = function () {
-            if (recordedVideoChunks.length > 0) {
-              recordedVideoBlob = new Blob(recordedVideoChunks, { type: recorderMime });
-              setMessage('', '');
-            } else {
-              setMessage('', '');
-            }
-            if (mediaStream) {
-              mediaStream.getTracks().forEach(function (t) { t.stop(); });
-              mediaStream = null;
-            }
-            videoPreview.srcObject = null;
-            videoPreview.style.display = 'none';
-            videoPlaceholder.style.display = 'flex';
-          };
-          mediaRecorder.stop();
-        } else if (mediaStream) {
+        if (mediaStream) {
           mediaStream.getTracks().forEach(function (t) { t.stop(); });
           mediaStream = null;
           videoPreview.srcObject = null;
           videoPreview.style.display = 'none';
           videoPlaceholder.style.display = 'flex';
         }
-        mediaRecorder = null;
         videoTrack = null;
         zoomCap = null;
         videoZoomWrap.classList.remove('visible');

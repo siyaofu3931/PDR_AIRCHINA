@@ -95,4 +95,6 @@ async def ws_pdr(websocket: WebSocket, session_id: str) -> None:
             pose = engine.process_frame(msg)
             await websocket.send_text(json.dumps(pose))
     except WebSocketDisconnect:
-        return
+        pass
+    finally:
+        sessions.pop(session_id, None)

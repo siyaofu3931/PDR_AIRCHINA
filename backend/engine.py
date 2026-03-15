@@ -36,8 +36,11 @@ class PdrConfig:
     min_prominence: float = 0.35
     thr_floor: float = 0.15
     valley_below_mu: bool = True
+    valley_timeout_ms: float = 1500.0  # force allow next step if no step for this long
+    gap_reset_dt_ms: float = 150.0  # reset band-pass state when gap exceeds this
     # Gravity / signal
     gravity_alpha: float = 0.92
+    gravity_init_samples: int = 5  # init gravity from first N samples (mean of acc_g)
     k_weinberg: float = 0.5
     gyro_alpha_sign: float = -1.0
     map_match_max_snap_m: float = 7.0
@@ -82,6 +85,8 @@ class PdrState:
     mag_prev1: Optional[float] = None
     min_since_last_step: float = 1e9
     had_valley_since_last_step: bool = True
+    gravity_initialized: bool = False
+    gravity_init_buf: list = field(default_factory=list)  # [(gx,gy,gz), ...] for init
 
 
 @dataclass
@@ -248,13 +253,29 @@ class PdrEngine:
         ay = float(acc_g.get("y", 0.0))
         az = float(acc_g.get("z", 0.0))
         gx, gy, gz = self.state.gravity
-        a = self.cfg.gravity_alpha
-        gx = a * gx + (1 - a) * ax
-        gy = a * gy + (1 - a) * ay
-        gz = a * gz + (1 - a) * az
-        self.state.gravity = (gx, gy, gz)
-        lx, ly, lz = ax - gx, ay - gy, az - gz
-        self.state.lin = (lx, ly, lz)
+        if not self.state.gravity_initialized:
+            self.state.gravity_init_buf.append((ax, ay, az))
+            if len(self.state.gravity_init_buf) >= self.cfg.gravity_init_samples:
+                n = len(self.state.gravity_init_buf)
+                gx = sum(p[0] for p in self.state.gravity_init_buf) / n
+                gy = sum(p[1] for p in self.state.gravity_init_buf) / n
+                gz = sum(p[2] for p in self.state.gravity_init_buf) / n
+                self.state.gravity = (gx, gy, gz)
+                self.state.gravity_initialized = True
+                self.state.gravity_init_buf.clear()
+            else:
+                lx, ly, lz = 0.0, 0.0, 0.0
+        if self.state.gravity_initialized:
+            a = self.cfg.gravity_alpha
+            gx, gy, gz = self.state.gravity
+            gx = a * gx + (1 - a) * ax
+            gy = a * gy + (1 - a) * ay
+            gz = a * gz + (1 - a) * az
+            self.state.gravity = (gx, gy, gz)
+            lx, ly, lz = ax - gx, ay - gy, az - gz
+            self.state.lin = (lx, ly, lz)
+        else:
+            lx, ly, lz = 0.0, 0.0, 0.0
 
         # 1) Orientation-invariant magnitude: prefer linear acc from device when available (ALGORITHM_COMPARISON §6)
         acc_linear = frame.get("acc_linear")
@@ -270,8 +291,18 @@ class PdrEngine:
             mag = math.sqrt(lx * lx + ly * ly + lz * lz)
 
         # 2) Time step for filter (cap to avoid big gaps from network jitter)
+        raw_dt_ms = (
+            (t_ms - self.state.last_step_detect_ms)
+            if self.state.last_step_detect_ms is not None
+            else 0.0
+        )
+        if raw_dt_ms > self.cfg.gap_reset_dt_ms:
+            self.state.bp_hp_prev = 0.0
+            self.state.bp_lp_prev = 0.0
+            self.state.last_mag_raw = None
+            self.state.had_valley_since_last_step = True
         if self.state.last_step_detect_ms is not None:
-            dt_sec = min((t_ms - self.state.last_step_detect_ms) / 1000.0, 0.1)
+            dt_sec = min(raw_dt_ms / 1000.0, 0.1)
         else:
             dt_sec = 0.02
         self.state.last_step_detect_ms = t_ms
@@ -307,6 +338,12 @@ class PdrEngine:
             sigma = math.sqrt(max(0.0, variance))
             threshold = max(mu + self.cfg.adaptive_k * sigma, self.cfg.thr_floor)
         if self.cfg.valley_below_mu and len(self.state.mag_buffer) >= self.cfg.min_samples_for_threshold and lp_out < mu:
+            self.state.had_valley_since_last_step = True
+        if (
+            self.cfg.valley_timeout_ms > 0
+            and self.state.last_step_time_ms > 0
+            and (t_ms - self.state.last_step_time_ms) >= self.cfg.valley_timeout_ms
+        ):
             self.state.had_valley_since_last_step = True
 
         # 6) Peak check: mag_prev1 is local maximum, passes prominence and valley guard
