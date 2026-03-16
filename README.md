@@ -117,6 +117,15 @@ When using the app with **orienta_v2_step2** (e.g. deployed at `orienta-v2-step2
 
 **Requirement:** The page must be loaded over **HTTPS** so the device can provide IMU data (and thus PDR trajectory).
 
+## GPS / map coordinate offset (China)
+
+In mainland China, many devices and map APIs use **GCJ-02** (“Mars” coordinates) instead of **WGS-84** (GPS / OpenStreetMap). Plotting one system on the other causes an offset of roughly 50–700 m.
+
+- **Backend (Python):** The module `backend/coord_convert.py` converts between GCJ-02 and WGS-84 (no extra dependency). Use `coord_convert.gcj02_to_wgs84(lat, lon)` for OSM/back-office display, or `coord_convert.wgs84_to_gcj02(lat, lon)` for Chinese map APIs. There is also an API: `POST /api/coord/gcj02_to_wgs84` with body `{"lat": 40.0, "lng": 116.4}`.
+- **Frontend:** When the app detects China (e.g. via IP), it assumes the device may return GCJ-02. It converts GPS to WGS-84 when you set the map origin (“use my location”) and when pushing trajectory to the Orienta back office, so the path aligns with OpenStreetMap.
+
+Reference: [中华人民共和国地理数据限制](https://zh.wikipedia.org/wiki/中华人民共和国地理数据限制) (Wikipedia).
+
 ## File layout
 
 - `index.html` — Single-page app: PDR (Weinberg step length, gyro+mag heading fusion), drift warning, landmark calibration, behavior tag, JSON download with trajectory for APE/RPE.

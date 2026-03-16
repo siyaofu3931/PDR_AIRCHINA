@@ -3,14 +3,16 @@ import random
 import time
 import uuid
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from .engine import PdrEngine
+from . import coord_convert
 
 TILE_SOURCES = [
     "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -62,6 +64,22 @@ async def proxy_tile(z: int, x: int, y: int) -> Response:
             )
     except Exception:
         return Response(status_code=502)
+
+
+class CoordBody(BaseModel):
+    lat: float
+    lng: Optional[float] = None
+    lon: Optional[float] = None
+
+
+@app.post("/api/coord/gcj02_to_wgs84")
+def api_gcj02_to_wgs84(body: CoordBody) -> Dict:
+    """Convert a single point from GCJ-02 to WGS-84 (for OSM / GPS)."""
+    lon = body.lng if body.lng is not None else body.lon
+    if lon is None:
+        return {"error": "lng or lon required"}
+    wgs_lat, wgs_lon = coord_convert.gcj02_to_wgs84(body.lat, lon)
+    return {"lat": wgs_lat, "lng": wgs_lon}
 
 
 @app.post("/api/session")

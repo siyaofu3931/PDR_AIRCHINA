@@ -727,6 +727,8 @@
       const TILE_PROVIDER_CHINA = 0;
       const TILE_PROVIDER_OSM = 3;
       let activeTileProviderIndex = 0;
+      /** When true, assume device GPS returns GCJ-02 (China); convert to WGS-84 for OSM/orienta. */
+      let gpsIsGCJ02 = false;
       let indoorCorrectionEnabled = false;
       const indoorCorrectionConfig = {
         turnThresholdDeg: 30,
@@ -1146,6 +1148,48 @@
         return [lat, lng];
       }
 
+      // Phone in China → GCJ-02; OSM uses WGS-84. Convert so position plots correctly on OSM.
+      // See: https://zh.wikipedia.org/wiki/中华人民共和国地理数据限制 (same logic as coordtransform)
+      function gcj02ToWgs84(lat, lng) {
+        if (outOfChina(lng, lat)) return [lat, lng];
+        var a = 6378245.0, ee = 0.00669342162296594323;
+        function transformLat(x, y) {
+          var ret = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+          ret += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI)) * 2/3;
+          ret += (20*Math.sin(y*Math.PI) + 40*Math.sin(y/3*Math.PI)) * 2/3;
+          ret += (160*Math.sin(y/12*Math.PI) + 320*Math.sin(y*Math.PI/30)) * 2/3;
+          return ret;
+        }
+        function transformLon(x, y) {
+          var ret = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+          ret += (20*Math.sin(6*x*Math.PI) + 20*Math.sin(2*x*Math.PI)) * 2/3;
+          ret += (20*Math.sin(x*Math.PI) + 40*Math.sin(x/3*Math.PI)) * 2/3;
+          ret += (150*Math.sin(x/12*Math.PI) + 300*Math.sin(x/30*Math.PI)) * 2/3;
+          return ret;
+        }
+        function wgs84ToGcj02(lat0, lon0) {
+          var dlat = transformLat(lon0 - 105, lat0 - 35);
+          var dlon = transformLon(lon0 - 105, lat0 - 35);
+          var radlat = lat0 / 180 * Math.PI;
+          var magic = Math.sin(radlat);
+          magic = 1 - ee * magic * magic;
+          var sqrtmagic = Math.sqrt(magic);
+          dlat = (dlat * 180) / (a * (1 - ee) / (magic * sqrtmagic) * Math.PI);
+          dlon = (dlon * 180) / (a / sqrtmagic * Math.cos(radlat) * Math.PI);
+          return [lat0 + dlat, lon0 + dlon];
+        }
+        var wgsLat = lat, wgsLon = lng;
+        for (var i = 0; i < 3; i++) {
+          var gcj = wgs84ToGcj02(wgsLat, wgsLon);
+          wgsLat += lat - gcj[0];
+          wgsLon += lng - gcj[1];
+        }
+        return [wgsLat, wgsLon];
+      }
+      function outOfChina(lng, lat) {
+        return !(lng > 73.66 && lng < 135.05 && lat > 3.86 && lat < 53.55);
+      }
+
       function pushTrajectoryToOrienta(forcePeriodic) {
         if (!orientaWsOpen || !orientaWs || orientaWs.readyState !== WebSocket.OPEN) return;
         var now = Date.now();
@@ -1153,9 +1197,11 @@
         lastOrientaPushMs = now;
         var path = (trajectory.path && trajectory.path.length) ? trajectory.path.map(function (p) {
           var ll = metersToLatLng(p.x, p.y);
+          if (gpsIsGCJ02) ll = gcj02ToWgs84(ll[0], ll[1]);
           return { lat: ll[0], lng: ll[1] };
         }) : [];
         var cur = metersToLatLng(trajectory.x, trajectory.y);
+        if (gpsIsGCJ02) cur = gcj02ToWgs84(cur[0], cur[1]);
         var position = { lat: cur[0], lng: cur[1] };
         orientaWs.send(JSON.stringify({ type: 'pax_trajectory', path: path, position: position }));
       }
@@ -1179,9 +1225,14 @@
       function useApproxCurrentPosition() {
         if (!navigator.geolocation) return;
         navigator.geolocation.getCurrentPosition(function (pos) {
-          const lat = pos && pos.coords ? pos.coords.latitude : null;
-          const lng = pos && pos.coords ? pos.coords.longitude : null;
+          let lat = pos && pos.coords ? pos.coords.latitude : null;
+          let lng = pos && pos.coords ? pos.coords.longitude : null;
           if (lat == null || lng == null) return;
+          if (gpsIsGCJ02) {
+            var wgs = gcj02ToWgs84(lat, lng);
+            lat = wgs[0];
+            lng = wgs[1];
+          }
           setMapOrigin(lat, lng);
           if (!recording && map) map.setView([lat, lng], 20);
         }, function () {
@@ -1213,6 +1264,7 @@
         if (!mapContainer || map !== null) return;
         map = L.map('trajectoryMap', { zoomControl: true, attributionControl: false }).setView([mapOriginLat, mapOriginLng], 20);
         detectChinaRegion().then(function (isChina) {
+          gpsIsGCJ02 = isChina;
           setBaseTileProvider(isChina ? TILE_PROVIDER_CHINA : TILE_PROVIDER_OSM);
         });
         originMarker = L.marker([mapOriginLat, mapOriginLng], {
