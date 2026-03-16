@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -83,9 +83,16 @@ def api_gcj02_to_wgs84(body: CoordBody) -> Dict:
 
 
 @app.post("/api/session")
-def create_session() -> Dict:
+async def create_session(request: Request) -> Dict:
+    platform = "ios"
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and body.get("platform") == "android":
+            platform = "android"
+    except Exception:
+        pass
     sid = str(uuid.uuid4())
-    engine = PdrEngine()
+    engine = PdrEngine(platform=platform)
     engine.reset(time.time() * 1000.0)
     sessions[sid] = engine
     return {"session_id": sid}

@@ -967,8 +967,19 @@
         return url.toString();
       }
 
+      function detectPlatform() {
+        var ua = navigator.userAgent.toLowerCase();
+        if (ua.indexOf('android') >= 0) return 'android';
+        if (ua.indexOf('iphone') >= 0 || ua.indexOf('ipad') >= 0) return 'ios';
+        return 'ios';
+      }
       async function createPdrSession() {
-        const resp = await fetch(getBackendBaseUrl() + '/api/session', { method: 'POST' });
+        const platform = detectPlatform();
+        const resp = await fetch(getBackendBaseUrl() + '/api/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform: platform })
+        });
         if (!resp.ok) throw new Error('后端会话创建失败：' + resp.status);
         const data = await resp.json();
         if (!data || !data.session_id) throw new Error('后端返回了无效会话');
@@ -1147,6 +1158,37 @@
         const lng = mapOriginLng + (xM / (METERS_PER_DEG_LAT * Math.cos(mapOriginLat * Math.PI / 180)));
         return [lat, lng];
       }
+      function wgs84ToGcj02(lat, lng) {
+        if (lng < 72 || lng > 138 || lat < 18 || lat > 54) return [lat, lng];
+        var pi = Math.PI, a = 6378245.0, ee = 0.00669342162296594323;
+        function transformLat(x, y) {
+          var ret = -100 + 2*x + 3*y + 0.2*y*y + 0.1*x*y + 0.2*Math.sqrt(Math.abs(x));
+          ret += (20*Math.sin(6*x*pi) + 20*Math.sin(2*x*pi)) * 2/3;
+          ret += (20*Math.sin(y*pi) + 40*Math.sin(y/3*pi)) * 2/3;
+          ret += (160*Math.sin(y/12*pi) + 320*Math.sin(y*pi/30)) * 2/3;
+          return ret;
+        }
+        function transformLng(x, y) {
+          var ret = 300 + x + 2*y + 0.1*x*x + 0.1*x*y + 0.1*Math.sqrt(Math.abs(x));
+          ret += (20*Math.sin(6*x*pi) + 20*Math.sin(2*x*pi)) * 2/3;
+          ret += (20*Math.sin(x*pi) + 40*Math.sin(x/3*pi)) * 2/3;
+          ret += (150*Math.sin(x/12*pi) + 300*Math.sin(x/30*pi)) * 2/3;
+          return ret;
+        }
+        var dLat = transformLat(lng - 105, lat - 35);
+        var dLng = transformLng(lng - 105, lat - 35);
+        var radLat = lat / 180 * pi;
+        var magic = Math.sin(radLat);
+        magic = 1 - ee * magic * magic;
+        var sqrtMagic = Math.sqrt(magic);
+        dLat = (dLat * 180) / ((a * (1 - ee)) / (magic * sqrtMagic) * pi);
+        dLng = (dLng * 180) / (a / sqrtMagic * Math.cos(radLat) * pi);
+        return [lat + dLat, lng + dLng];
+      }
+      function toDisplayLatLng(lat, lng) {
+        if (activeTileProviderIndex === 2) return wgs84ToGcj02(lat, lng);
+        return [lat, lng];
+      }
 
       // Phone in China → GCJ-02; OSM uses WGS-84. Convert so position plots correctly on OSM.
       // See: https://zh.wikipedia.org/wiki/中华人民共和国地理数据限制 (same logic as coordtransform)
@@ -1217,8 +1259,9 @@
       function setMapOrigin(lat, lng) {
         mapOriginLat = lat;
         mapOriginLng = lng;
-        if (originMarker) originMarker.setLatLng([lat, lng]);
-        if (map && !recording) map.setView([lat, lng], map.getZoom());
+        var display = toDisplayLatLng(lat, lng);
+        if (originMarker) originMarker.setLatLng(display);
+        if (map && !recording) map.setView(display, map.getZoom());
         updateMapTrajectory();
       }
 
@@ -1262,12 +1305,13 @@
 
       function initMap() {
         if (!mapContainer || map !== null) return;
-        map = L.map('trajectoryMap', { zoomControl: true, attributionControl: false }).setView([mapOriginLat, mapOriginLng], 20);
+        var initView = toDisplayLatLng(mapOriginLat, mapOriginLng);
+        map = L.map('trajectoryMap', { zoomControl: true, attributionControl: false }).setView(initView, 20);
         detectChinaRegion().then(function (isChina) {
           gpsIsGCJ02 = isChina;
           setBaseTileProvider(isChina ? TILE_PROVIDER_CHINA : TILE_PROVIDER_OSM);
         });
-        originMarker = L.marker([mapOriginLat, mapOriginLng], {
+        originMarker = L.marker(initView, {
           icon: L.divIcon({
             className: 'origin-marker-gate',
             html: '<div class="gate-marker-inner"></div>',
@@ -1278,7 +1322,7 @@
         trajectoryPolyline = L.polyline([], { color: '#4a9eff', weight: 6, opacity: 0.95, dashArray: '10, 8' }).addTo(map);
         trajectoryRawPolyline = L.polyline([], { color: '#4a9eff', weight: 6, opacity: 0.95, dashArray: '10, 8' }).addTo(map);
         trajectorySegmentLayer = L.layerGroup().addTo(map);
-        positionMarker = L.marker([mapOriginLat, mapOriginLng], {
+        positionMarker = L.marker(initView, {
           icon: L.divIcon({
             className: 'user-arrow-wrapper',
             html: '<div class="user-arrow-icon"></div>',
@@ -1330,6 +1374,7 @@
           setBaseTileProvider(nextIndex);
           setMessage('当前网络地图加载不稳定，已切换到备用底图。', 'error');
         });
+        updateMapTrajectory();
       }
 
       function updateUserArrowHeading() {
@@ -1345,14 +1390,18 @@
       function updateMapTrajectory() {
         if (!map || !trajectoryPolyline || !positionMarker) return;
         const pts = trajectory.path;
-        const latlngs = pts.map(function (p) { return metersToLatLng(p.x, p.y); });
+        const toDisplay = function (p) {
+          var ll = metersToLatLng(p.x, p.y);
+          return toDisplayLatLng(ll[0], ll[1]);
+        };
+        const latlngs = pts.map(toDisplay);
         trajectoryPolyline.setLatLngs([]);
         if (indoorCorrectionEnabled) {
           trajectoryRawPolyline.setLatLngs([]);
           trajectorySegmentLayer.clearLayers();
           const correctedSegments = extractIndoorSegments(pts);
           correctedSegments.forEach(function (seg) {
-            const segLatLngs = seg.points.map(function (p) { return metersToLatLng(p.x, p.y); });
+            const segLatLngs = seg.points.map(toDisplay);
             L.polyline(segLatLngs, {
               color: seg.type === 'turn' ? '#ff2d2d' : '#2d7fff',
               weight: 6,
@@ -1364,14 +1413,15 @@
           trajectorySegmentLayer.clearLayers();
           trajectoryRawPolyline.setLatLngs(latlngs);
         }
-        const current = metersToLatLng(trajectory.x, trajectory.y);
-        positionMarker.setLatLng(current);
+        var curLl = metersToLatLng(trajectory.x, trajectory.y);
+        positionMarker.setLatLng(toDisplayLatLng(curLl[0], curLl[1]));
         updateUserArrowHeading();
         if (latlngs.length >= 2) {
           const bounds = L.latLngBounds(latlngs);
           map.fitBounds(bounds.pad(0.08), { maxZoom: 21 });
         } else {
-          map.setView([mapOriginLat, mapOriginLng], 20);
+          var originDisplay = toDisplayLatLng(mapOriginLat, mapOriginLng);
+          map.setView(originDisplay, 20);
         }
       }
 

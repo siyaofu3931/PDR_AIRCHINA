@@ -178,8 +178,9 @@ class CorridorMatcher:
 
 
 class PdrEngine:
-    def __init__(self, config: Optional[PdrConfig] = None):
+    def __init__(self, config: Optional[PdrConfig] = None, platform: str = "ios"):
         self.cfg = config or PdrConfig()
+        self.platform = (platform or "ios").lower()
         self.state = PdrState()
         corridor_file = Path(__file__).resolve().parents[1] / self.cfg.corridor_relpath
         self.matcher = CorridorMatcher(
@@ -228,7 +229,8 @@ class PdrEngine:
         self.state.last_motion_ms = t_ms
         if dt <= 0.0 or dt > 0.2:
             return
-        yaw_rate = self.cfg.gyro_alpha_sign * float(alpha)
+        gyro_sign = -1.0 if self.platform == "ios" else 1.0
+        yaw_rate = gyro_sign * float(alpha)
         self._update_turn_mode(yaw_rate, t_ms)
         self.state.heading_gyro_rad = wrap_rad(self.state.heading_gyro_rad + math.radians(yaw_rate * dt))
         if self.state.heading_mag_deg is not None:
