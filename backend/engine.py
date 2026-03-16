@@ -200,10 +200,10 @@ class PdrEngine:
             self.state.heading_mag_deg = float(webkit)
             self.state.mag_source_weight = 1.0
         elif absolute is True and isinstance(alpha, (int, float)) and math.isfinite(alpha):
-            self.state.heading_mag_deg = float(alpha)
+            self.state.heading_mag_deg = 360 - float(alpha)
             self.state.mag_source_weight = 0.85
         elif isinstance(alpha, (int, float)) and math.isfinite(alpha):
-            self.state.heading_mag_deg = float(alpha)
+            self.state.heading_mag_deg = 360 - float(alpha)
             self.state.mag_source_weight = 0.45
 
     def _update_turn_mode(self, yaw_rate_deg_s: float, t_ms: float) -> None:
